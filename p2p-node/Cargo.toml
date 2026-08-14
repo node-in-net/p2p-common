@@ -1,0 +1,27 @@
+[package]
+name = "p2p-node"
+version = "0.1.286"
+edition = "2021"
+description = "The peer node: local mesh, mDNS discovery, Noise-encrypted sessions, and resource-access control for incoming messages"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/node-in-net/p2p-common"
+publish = false
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+futures-util = "0.3"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { version = "1.8", features = ["v4"] }
+hostname = "0.4"
+nodeinnet-p2p = { workspace = true }
+async-trait = "0.1"
+# only for version::APP_VERSION, announced by the local mesh
+common = { workspace = true }
+bson = { version = "3.1.0", features = ["serde"] }
+mdns-sd = "0.20.0"
+snow = "0.9.6"
+client-config = { workspace = true }
+sha2 = "0.10"
+base64 = "0.21"
+
