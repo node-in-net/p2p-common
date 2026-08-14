@@ -24,13 +24,17 @@ log = "0.4"
 async-trait = "0.1"
 bytes.workspace = true
 bson = { version = "3.1.0", features = ["serde"] }
-openh264 = "0.4"
-openh264-sys2 = "0.4"
-rtp = "0.6"
+openh264 = { version = "0.4", optional = true }
+openh264-sys2 = { version = "0.4", optional = true }
+rtp = { version = "0.6", optional = true }
 base64 = "0.21"
 yuv = { version = "0.8.16", optional = true }
 
 [features]
-default = ["feature-power", "simd-yuv"]
+default = ["feature-power", "simd-yuv", "feature-rdesk"]
 feature-power = []
+# Screen sharing and viewing: the H.264 codec and the WebRTC media path. A node
+# that neither shares nor views a screen does not compile the codec at all.
+feature-rdesk = ["dep:openh264", "dep:openh264-sys2", "dep:rtp"]
+# Picks the SIMD colour-conversion path; only relevant with `feature-rdesk`.
 simd-yuv = ["dep:yuv"]

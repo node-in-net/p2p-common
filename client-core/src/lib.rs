@@ -1,4 +1,5 @@
 pub mod auth;
+#[cfg(feature = "feature-rdesk")]
 pub mod desktop;
 pub mod network;
 pub mod rtc;

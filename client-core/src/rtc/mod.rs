@@ -1,5 +1,6 @@
 pub mod chunking;
 pub mod core;
+#[cfg(feature = "feature-rdesk")]
 pub mod video_utils;
 
 #[cfg(test)]
@@ -12,18 +13,30 @@ use nodeinnet_p2p::{NodeInfo, WsMessage};
 use p2p_node::NodeContext;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "feature-rdesk")]
 use crate::desktop::{CapturedFrame, DesktopStreamStatus, desktop_provider};
+#[cfg(feature = "feature-rdesk")]
 use base64::Engine;
+#[cfg(feature = "feature-rdesk")]
 use openh264::decoder::Decoder;
+#[cfg(feature = "feature-rdesk")]
 use openh264::formats::YUVSource;
+#[cfg(feature = "feature-rdesk")]
 use rtp::codecs::h264::H264Packet;
+#[cfg(feature = "feature-rdesk")]
 use rtp::packetizer::Depacketizer;
+#[cfg(feature = "feature-rdesk")]
 use std::sync::OnceLock;
+#[cfg(feature = "feature-rdesk")]
 use std::sync::atomic::AtomicBool;
+#[cfg(feature = "feature-rdesk")]
 use webrtc::media::Sample;
+#[cfg(feature = "feature-rdesk")]
 use webrtc::track::track_local::TrackLocal;
+#[cfg(feature = "feature-rdesk")]
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
+#[cfg(feature = "feature-rdesk")]
 static ACTIVE_HOST_STREAMS: OnceLock<
     Mutex<
         std::collections::HashMap<
@@ -36,10 +49,12 @@ static ACTIVE_HOST_STREAMS: OnceLock<
         >,
     >,
 > = OnceLock::new();
+#[cfg(feature = "feature-rdesk")]
 static ACTIVE_HOST_ORIGINAL_SIZE: OnceLock<
     Mutex<std::collections::HashMap<(uuid::Uuid, String), Arc<AtomicBool>>>,
 > = OnceLock::new();
 
+#[cfg(feature = "feature-rdesk")]
 fn active_streams() -> &'static Mutex<
     std::collections::HashMap<
         (uuid::Uuid, String),
@@ -53,11 +68,13 @@ fn active_streams() -> &'static Mutex<
     ACTIVE_HOST_STREAMS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+#[cfg(feature = "feature-rdesk")]
 fn active_original_sizes()
 -> &'static Mutex<std::collections::HashMap<(uuid::Uuid, String), Arc<AtomicBool>>> {
     ACTIVE_HOST_ORIGINAL_SIZE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+#[cfg(feature = "feature-rdesk")]
 fn active_bitrates() -> &'static Mutex<
     std::collections::HashMap<(uuid::Uuid, String), Arc<std::sync::atomic::AtomicU32>>,
 > {
@@ -74,6 +91,7 @@ const P2P_PING_INTERVAL_SECS: u64 = 15;
 /// kicks in promptly.
 const P2P_PONG_TIMEOUT_MS: u64 = 45_000;
 
+#[cfg(feature = "feature-rdesk")]
 struct SimpleYuvSource<'a> {
     pub width: i32,
     pub height: i32,
@@ -82,6 +100,7 @@ struct SimpleYuvSource<'a> {
     pub v: &'a [u8],
 }
 
+#[cfg(feature = "feature-rdesk")]
 impl<'a> YUVSource for SimpleYuvSource<'a> {
     fn width(&self) -> i32 {
         self.width
@@ -201,6 +220,7 @@ async fn wait_until_signaling_stable(
 /// by `wait_until_signaling_stable`, so concurrent start/stop requests (or an ICE
 /// restart) queue instead of racing on `set_local_description` (glare). Shared by
 /// the track-add and track-remove paths.
+#[cfg(feature = "feature-rdesk")]
 fn spawn_rdesk_renegotiation(
     pc: Arc<RTCPeerConnection>,
     node_context: NodeContext,
@@ -269,6 +289,9 @@ async fn handle_incoming_p2p_message(
     peer_connection: Arc<RTCPeerConnection>,
     connection_id: uuid::Uuid,
 ) {
+    #[cfg(not(feature = "feature-rdesk"))]
+    let _ = connection_id;
+
     handler
         .on_log(format!(
             "📥 [INCOMING BSON] from {}: size {} bytes",
@@ -503,6 +526,7 @@ async fn handle_incoming_p2p_message(
         }
 
         // --- Intercept Remote Desktop / SDP renegotiation ---
+        #[cfg(feature = "feature-rdesk")]
         if let P2pMessage::RemoteDesktopRequest {
             ref resource_id,
             start,
@@ -1213,8 +1237,11 @@ impl WebRtcClient {
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
         // --- Setup Track reception callback ---
+        #[cfg(feature = "feature-rdesk")]
         let pc_track = Arc::downgrade(&peer_connection);
+        #[cfg(feature = "feature-rdesk")]
         let handler_track = handler.clone();
+        #[cfg(feature = "feature-rdesk")]
         peer_connection.on_track(Box::new(move |track, _receiver| {
             let track_clone = track.clone();
             let pc_weak = pc_track.clone();
@@ -2300,6 +2327,9 @@ pub fn spawn_connection_type_poller(
     });
 }
 
+/// Tears down the screen-capture tasks this connection started. Without
+/// `feature-rdesk` there are none, so there is nothing to drop.
+#[cfg(feature = "feature-rdesk")]
 impl Drop for WebRtcClient {
     fn drop(&mut self) {
         let pc = self.peer_connection.clone();
