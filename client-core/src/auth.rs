@@ -124,7 +124,16 @@ pub async fn register_device(
     node_id: &str,
     profile: &DeviceProfile,
 ) -> Result<nodeinnet_p2p::Device, String> {
-    let bson_bytes = bson::ser::serialize_to_vec(profile)
+    // Local paths stay on the device.
+    let profile = DeviceProfile {
+        resources: profile
+            .resources
+            .iter()
+            .map(|r| r.without_config())
+            .collect(),
+        ..profile.clone()
+    };
+    let bson_bytes = bson::ser::serialize_to_vec(&profile)
         .map_err(|e| format!("Failed to encode device profile: {}", e))?;
     let client = Client::new();
     let resp = client

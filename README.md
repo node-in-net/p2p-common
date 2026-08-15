@@ -5,10 +5,6 @@ the peer node, and the client that connects to it. The capabilities a node
 serves live in [`p2p-functions`](https://github.com/node-in-net/p2p-functions);
 nothing here reads files, opens terminals or captures screens.
 
-Shared by the [node.in.net](https://node.in.net) client and
-[Ice Commander](https://icecommander.com), so both speak one definition of the
-protocol and cannot drift apart.
-
 ## Crates
 
 | Crate | What it is |

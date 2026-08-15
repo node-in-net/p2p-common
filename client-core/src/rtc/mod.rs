@@ -2327,8 +2327,7 @@ pub fn spawn_connection_type_poller(
     });
 }
 
-/// Tears down the screen-capture tasks this connection started. Without
-/// `feature-rdesk` there are none, so there is nothing to drop.
+/// Tears down the screen-capture tasks this connection started.
 #[cfg(feature = "feature-rdesk")]
 impl Drop for WebRtcClient {
     fn drop(&mut self) {

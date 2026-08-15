@@ -632,9 +632,8 @@ pub struct SharedResource {
     pub id: String,
     pub name: String,
     pub resource_type: ResourceType,
-    /// Per-resource config (e.g. a local filesystem path). LOCAL-ONLY — stripped
-    /// before announcing to peers/server (see [`SharedResource::without_config`])
-    /// so local paths never travel the wire; the serving node keeps its own copy.
+    /// Per-resource config (e.g. a local filesystem path). Stripped by
+    /// [`SharedResource::without_config`] before it leaves the machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
     #[serde(default = "default_true")]

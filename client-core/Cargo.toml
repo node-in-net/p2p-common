@@ -33,8 +33,7 @@ yuv = { version = "0.8.16", optional = true }
 [features]
 default = ["feature-power", "simd-yuv", "feature-rdesk"]
 feature-power = []
-# Screen sharing and viewing: the H.264 codec and the WebRTC media path. A node
-# that neither shares nor views a screen does not compile the codec at all.
+# Screen sharing and viewing: the H.264 codec and the WebRTC media path.
 feature-rdesk = ["dep:openh264", "dep:openh264-sys2", "dep:rtp"]
-# Picks the SIMD colour-conversion path; only relevant with `feature-rdesk`.
+# SIMD colour conversion; only relevant with `feature-rdesk`.
 simd-yuv = ["dep:yuv"]
