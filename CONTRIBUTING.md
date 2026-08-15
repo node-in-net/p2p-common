@@ -26,11 +26,18 @@ It looks like this, and the name and e-mail must match the commit author:
 Signed-off-by: Jane Doe <jane@example.com>
 ```
 
-To never forget it:
+To never forget it, install a hook — once per clone. Note that
+`git config format.signoff` does **not** do this; it only affects
+`git format-patch`:
 
 ```sh
-git config format.signoff true
+printf '%s\n' '#!/bin/sh' 'git interpret-trailers --in-place --if-exists doNothing --trailer "Signed-off-by: $(git config user.name) <$(git config user.email)>" "$1"' > .git/hooks/prepare-commit-msg
+chmod +x .git/hooks/prepare-commit-msg
 ```
+
+It reads `user.name` and `user.email` from git's config, runs for `git commit`
+from any editor or GUI, and does not add a second line when you already
+passed `-s`.
 
 Missing a sign-off on an existing commit? `git commit --amend -s` fixes the
 last one; `git rebase --signoff <base>` fixes a whole branch. A CI check
