@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn test_local_mesh_handshake_and_signaling() {
-    let config = client_config::AppConfig::new("ice-commander-test");
+    let config = client_config::AppConfig::new("p2p-node-mesh-test");
 
     // 2. Generate keypairs for Node A and Node B
     let (priv_a, pub_a) = generate_ed25519_keypair();

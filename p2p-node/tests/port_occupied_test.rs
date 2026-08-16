@@ -11,7 +11,7 @@ async fn test_port_occupied_error() {
     let my_id = "test_node_id".to_string();
     let dummy_priv_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string();
 
-    let config = client_config::AppConfig::new("ice-commander");
+    let config = client_config::AppConfig::new("p2p-node-port-test");
     let result =
         p2p_node::local_mesh::start_tcp_signaling_server(my_id, dummy_priv_key, config).await;
 

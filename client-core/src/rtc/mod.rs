@@ -656,10 +656,10 @@ async fn handle_incoming_p2p_message(
                                      let mut current_width = 0;
                                      let mut current_height = 0;
                                      let mut current_bitrate = 0;
- 
+
                                      let raw_frame_buffer = Arc::new(std::sync::Mutex::new(None));
                                      let raw_frame_buffer_capture = raw_frame_buffer.clone();
- 
+
                                      let stop_flag_inner = stop_flag_capture.clone();
                                      let handler_inner = handler_capture.clone();
                                      let rt_handle = tokio::runtime::Handle::current();
@@ -679,17 +679,17 @@ async fn handle_incoming_p2p_message(
                                              }),
                                          );
                                      }
- 
+
                                      let mut _frame_count = 0;
                                      let mut consecutive_none_frames = 0;
                                      while !stop_flag_capture.load(Ordering::Relaxed) {
                                          let start_time = std::time::Instant::now();
-                                         
+
                                          let frame_opt = {
                                              let mut guard = raw_frame_buffer.lock().unwrap();
                                              guard.take()
                                          };
-                                         
+
                                          let frame = if let Some(f) = frame_opt {
                                              consecutive_none_frames = 0;
                                              f
@@ -729,7 +729,7 @@ async fn handle_incoming_p2p_message(
                                          if target_h % 2 != 0 {
                                              target_h -= 1;
                                          }
- 
+
                                          let target_bitrate = bitrate_capture.load(Ordering::Relaxed);
                                          // Recreate the encoder only when the resolution changes. A
                                          // bitrate-only change is applied live via SetOption below, so
@@ -784,18 +784,18 @@ async fn handle_incoming_p2p_message(
                                                  }
                                              }
                                          }
- 
+
                                          let y_size = current_width * current_height;
                                          let uv_size = (current_width / 2) * (current_height / 2);
- 
+
                                          let yuv_data = video_utils::bgra_to_yuv420p(&frame.data, frame.width, frame.height, current_width, current_height);
- 
+
                                          _frame_count += 1;
-                                         
+
                                          let y_plane = &yuv_data[0..y_size];
                                          let u_plane = &yuv_data[y_size..(y_size + uv_size)];
                                          let v_plane = &yuv_data[(y_size + uv_size)..];
- 
+
                                          let yuv_source = SimpleYuvSource {
                                              width: current_width as i32,
                                              height: current_height as i32,
@@ -803,7 +803,7 @@ async fn handle_incoming_p2p_message(
                                              u: u_plane,
                                              v: v_plane,
                                          };
- 
+
                                          // If the viewer reported loss (PLI/FIR), make the next encoded
                                          // frame an IDR so the decoder can recover immediately.
                                          if force_keyframe_encoder.swap(false, Ordering::Relaxed) {
@@ -821,14 +821,14 @@ async fn handle_incoming_p2p_message(
                                          } else {
                                              Vec::new()
                                          };
- 
+
                                          if !bits.is_empty() {
                                              let sample = Sample {
                                                  data: bits.into(),
                                                  duration: std::time::Duration::from_millis(66),
                                                  ..Default::default()
                                              };
-                                             
+
                                              let encoded_bytes = sample.data.len();
                                              if encoded_bytes > 30720 {
                                                  let _ = handler_capture.on_log(format!(
@@ -843,7 +843,7 @@ async fn handle_incoming_p2p_message(
                                                      _frame_count, current_width, current_height, encoded_bytes
                                                  )).await;
                                              }
- 
+
                                              if let Err(e) = video_track.write_sample(&sample).await {
                                                  let _ = handler_capture.on_log(format!("❌ Failed to write track sample: {:?}", e)).await;
                                                  break;
@@ -856,7 +856,7 @@ async fn handle_incoming_p2p_message(
                                                  )).await;
                                              }
                                          }
- 
+
                                          let elapsed = start_time.elapsed();
                                          let target_delay = std::time::Duration::from_millis(66);
                                          if elapsed < target_delay {
@@ -868,7 +868,7 @@ async fn handle_incoming_p2p_message(
                                  streams.insert(key.clone(), (stop_flag, join_handle, rtp_sender));
                                  active_original_sizes().lock().await.insert(key.clone(), original_size_flag);
                                  active_bitrates().lock().await.insert(key.clone(), bitrate_flag);
-                                
+
                                 // Perform serialized SDP Offer renegotiation for the added track.
                                 spawn_rdesk_renegotiation(
                                     peer_conn_cloned.clone(),
@@ -1103,15 +1103,7 @@ async fn handle_incoming_p2p_message(
         }
 
         // Forward the message to the UI thread
-        match &p2p_msg {
-            P2pMessage::PowerCommand { .. } => {
-                #[cfg(feature = "feature-power")]
-                handler.on_p2p_message(p2p_msg.clone()).await;
-            }
-            _ => {
-                handler.on_p2p_message(p2p_msg.clone()).await;
-            }
-        }
+        handler.on_p2p_message(p2p_msg.clone()).await;
 
         // Some messages are handled by the p2p-node library
         node_context.process_message(p2p_msg.clone()).await;
@@ -1257,7 +1249,7 @@ impl WebRtcClient {
                         }
                     };
                     let mut depacketizer = H264Packet::default();
-                    
+
                     let mut bgra_buf = Vec::new();
                     let mut accumulated_compressed_size = 0;
                     let track_ssrc = t.ssrc();
@@ -1269,7 +1261,7 @@ impl WebRtcClient {
                          if pc_weak.upgrade().is_none() {
                              break;
                          }
- 
+
                          match t.read_rtp().await {
                              Ok((rtp_packet, _)) => {
                                  accumulated_compressed_size += rtp_packet.payload.len();
@@ -1278,37 +1270,37 @@ impl WebRtcClient {
                                          if !payload.is_empty() {
                                              let mut annex_b = vec![0u8, 0, 0, 1];
                                              annex_b.extend_from_slice(&payload);
- 
+
                                              match decoder.decode(&annex_b) {
                                              Ok(Some(decoded)) => {
                                                  let dec_w = decoded.width() as usize;
                                                  let dec_h = decoded.height() as usize;
-                                                 
+
                                                  let y_plane = decoded.y_with_stride();
                                                  let u_plane = decoded.u_with_stride();
                                                  let v_plane = decoded.v_with_stride();
                                                  let y_stride = decoded.y_stride() as usize;
                                                  let u_stride = decoded.u_stride() as usize;
                                                  let v_stride = decoded.v_stride() as usize;
- 
+
                                                  let target_len = dec_w * dec_h * 4;
                                                  if bgra_buf.len() != target_len {
                                                      bgra_buf = vec![0u8; target_len];
                                                  }
- 
+
                                                  video_utils::yuv420p_to_bgra(
                                                      y_plane, u_plane, v_plane,
                                                      dec_w, dec_h,
                                                      y_stride, u_stride, v_stride,
                                                      &mut bgra_buf
                                                  );
- 
+
                                                  let raw_track_id = t.id().await;
                                                  let clean_res_id = raw_track_id.strip_prefix("video-").unwrap_or(&raw_track_id).to_string();
- 
+
                                                  let current_frame_compressed_size = accumulated_compressed_size;
                                                  accumulated_compressed_size = 0; // reset for next frame
- 
+
                                                  h.on_local_p2p_event(p2p_node::LocalP2pEvent::RemoteDesktopFrame {
                                                      resource_id: clean_res_id,
                                                      bgra_data: bgra_buf.clone(),
@@ -1390,9 +1382,9 @@ impl WebRtcClient {
                 };
                 handler.on_log(format!("⚠️ [WebRTC State] Peer {} transport transitioned to {:?}", target, s)).await;
                 handler.on_peer_state_changed(target.clone(), state).await;
-                
-                if s == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed || 
-                   s == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed 
+
+                if s == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed ||
+                   s == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed
                 {
                     handler.on_log(format!("⚠️ Peer {} transport is broken ({:?}). Tearing down session to allow AutoConnect...", target, s)).await;
                     let _ = net_tx.send(crate::NetCmd::DisconnectPeerSession(target.clone(), conn_id)).await;
@@ -1698,15 +1690,15 @@ impl WebRtcClient {
             let ctx_msg = node_ctx_dc.clone();
             let net_tx_msg = net_tx_dc.clone();
             let connection_id_dc_inner = connection_id_dc;
-            
+
             let d_store_async = d.clone();
             let dc_store_clone_for_task = dc_store.clone();
             tokio::spawn(async move {
                 *dc_store_clone_for_task.lock().await = Some(d_store_async);
             });
-            
 
-            
+
+
             d.on_message({
                 let handler_msg = handler_msg.clone();
                 let dc_pong = d_clone_msg.clone();
@@ -1716,10 +1708,10 @@ impl WebRtcClient {
                 let net_tx_msg = net_tx_msg.clone();
                 let peer_conn_task = peer_conn_for_dc.clone();
                 let connection_id_task = connection_id_dc_inner;
-                
+
                 // Queue for handling SCTP message pieces sequentially
                 let (rx_tx, mut rx_rx) = tokio_mpsc::unbounded_channel::<bytes::Bytes>();
-                
+
                 // Background task to assemble chunks and drop them sequentially
                 let net_tx_task = net_tx_msg.clone();
                 tokio::spawn(async move {
@@ -1771,7 +1763,7 @@ impl WebRtcClient {
                             .to_string(),
                     ).await;
                     handler.on_peer_state_changed(target_node_ping.clone(), crate::P2pPeerState::Authenticating).await;
-                    
+
                     // Send Handshake to prove identity (but request 0 resources)
                     let priv_key = d_private_key_open.clone();
                     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -2032,10 +2024,10 @@ impl WebRtcClient {
             let net_tx_msg = net_tx_msg.clone();
             let peer_conn_task = pc_clone.clone();
             let connection_id_task = connection_id_msg;
-            
+
             // Queue for handling SCTP message pieces sequentially
             let (rx_tx, mut rx_rx) = tokio_mpsc::unbounded_channel::<bytes::Bytes>();
-            
+
             // Background task to assemble chunks and drop them sequentially
             let net_tx_task = net_tx_msg.clone();
             tokio::spawn(async move {

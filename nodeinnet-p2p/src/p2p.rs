@@ -286,12 +286,6 @@ pub enum P2pMessage {
         request_id: Uuid,
     },
 
-    // --- Power management ---
-    PowerCommand {
-        resource_id: String,
-        action: PowerAction,
-    },
-
     // --- Sync Folder ---
     SyncStateRequest {
         resource_id: String,
@@ -453,8 +447,6 @@ impl P2pMessage {
             | P2pMessage::HttpResponseChunk { .. }
             | P2pMessage::HttpResponseComplete { .. } => vec![ResourceType::SharedNetwork],
 
-            P2pMessage::PowerCommand { .. } => vec![ResourceType::PowerManagement],
-
             P2pMessage::SyncStateRequest { .. } | P2pMessage::SyncStateResponse { .. } => {
                 vec![ResourceType::SyncFolder]
             }
@@ -545,7 +537,6 @@ impl P2pMessage {
             P2pMessage::RtcSignal { .. } => None,
             P2pMessage::RequestTopology => None,
             P2pMessage::ResponseTopology { .. } => None,
-            P2pMessage::PowerCommand { resource_id, .. } => Some(resource_id),
         }
     }
 
@@ -588,7 +579,6 @@ impl P2pMessage {
             P2pMessage::HttpResponseStart { resource_id, .. } => *resource_id = new_id,
             P2pMessage::HttpResponseChunk { resource_id, .. } => *resource_id = new_id,
             P2pMessage::HttpResponseComplete { resource_id, .. } => *resource_id = new_id,
-            P2pMessage::PowerCommand { resource_id, .. } => *resource_id = new_id,
 
             P2pMessage::SyncStateRequest { resource_id, .. } => *resource_id = new_id,
             P2pMessage::SyncStateResponse { resource_id, .. } => *resource_id = new_id,
@@ -613,14 +603,6 @@ pub struct EntryInfo {
 pub enum FileTransferStatus {
     Accepted { total_size: u64 },
     Rejected { reason: String },
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum PowerAction {
-    Shutdown,
-    Reboot,
-    Sleep,
-    Logout,
 }
 
 fn default_true() -> bool {
@@ -662,7 +644,6 @@ pub enum ResourceType {
     Terminal,
     Registry,
     SharedNetwork,
-    PowerManagement,
 
     SyncFolder,
     RemoteDesktop,

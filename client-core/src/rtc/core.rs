@@ -17,7 +17,7 @@ pub async fn handle_core_message(
         P2pMessage::TextMessage { text } => {
             handler.on_log(format!("📦 [WebRTC Msg]: {}", text)).await;
         }
-        P2pMessage::Handshake { 
+        P2pMessage::Handshake {
             node_version,
             timestamp_ms,
             signature,
@@ -32,7 +32,7 @@ pub async fn handle_core_message(
             )).await;
 
             let my_id = node_context.my_info.id.clone();
-            
+
             // Replay Attack Validation
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
             if now > timestamp_ms && now - timestamp_ms > 60_000 {
@@ -54,10 +54,10 @@ pub async fn handle_core_message(
             match found_pub_key {
                 Some(pub_key) => {
                     if let Err(e) = nodeinnet_p2p::crypto::verify_p2p_handshake(
-                        &signature, 
-                        &pub_key, 
-                        &target_node_id, 
-                        &my_id, 
+                        &signature,
+                        &pub_key,
+                        &target_node_id,
+                        &my_id,
                         timestamp_ms
                     ) {
                         handler.on_log(format!("❌ Zero-Trust Crypto Verification FAILED for {}: {}", target_node_id, e)).await;
@@ -98,11 +98,11 @@ pub async fn handle_core_message(
             }
 
             // The Callee handles the Handshake and generates HandshakeResponse containing its resources and keys!
-            node_context.process_message(P2pMessage::Handshake { 
-                node_version, 
-                timestamp_ms, 
-                signature, 
-                requested_resources, 
+            node_context.process_message(P2pMessage::Handshake {
+                node_version,
+                timestamp_ms,
+                signature,
+                requested_resources,
                 max_chunk_size: peer_max_chunk_size_req,
                 local_tcp_port,
                 from_node_id,
@@ -143,7 +143,7 @@ pub async fn handle_core_message(
         | P2pMessage::FileTransferComplete { .. } // we also handled this in filemanager, but here it's an end to avoid the unhandled log
         | P2pMessage::FileTransferResponse { .. }
         | P2pMessage::FileChunk { .. }
-        | P2pMessage::TerminalOutput { .. } 
+        | P2pMessage::TerminalOutput { .. }
         | P2pMessage::SocksConnectResponse { .. } => {
             // Already sent to UI thread
         }

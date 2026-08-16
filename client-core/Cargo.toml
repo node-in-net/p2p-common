@@ -31,8 +31,7 @@ base64 = "0.21"
 yuv = { version = "0.8.16", optional = true }
 
 [features]
-default = ["feature-power", "simd-yuv", "feature-rdesk"]
-feature-power = []
+default = ["simd-yuv", "feature-rdesk"]
 # Screen sharing and viewing: the H.264 codec and the WebRTC media path.
 feature-rdesk = ["dep:openh264", "dep:openh264-sys2", "dep:rtp"]
 # SIMD colour conversion; only relevant with `feature-rdesk`.

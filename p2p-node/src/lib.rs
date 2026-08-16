@@ -378,7 +378,7 @@ mod tests {
         let (outgoing_tx, _) = mpsc::channel(1);
         let (log_tx, _) = mpsc::channel(1);
         let (event_tx, _) = mpsc::channel(1);
-        let config = client_config::AppConfig::new("_ice_p2p_node_test");
+        let config = client_config::AppConfig::new("p2p-node-unit-test");
         NodeContext::new(outgoing_tx, log_tx, event_tx, make_test_node_info(), config)
     }
 
