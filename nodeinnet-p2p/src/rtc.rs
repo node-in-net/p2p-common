@@ -55,53 +55,90 @@ pub struct TurnCredentials {
     pub uris: Vec<String>,
 }
 
+/// Relay region picked by the user in the client settings and sent to the
+/// server at login and token refresh. Only the server acts on it — the client
+/// uses the returned URI list verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnRegion {
+    /// Every relay we operate.
+    #[default]
+    Auto,
+    Eu,
+    Us,
+}
+
+/// Central relay embedded in the backend: UDP only. Always offered, whatever
+/// the region — ICE also pairs relay against relay, so a peer parked on another
+/// regional relay still connects through it.
+const CENTRAL_RELAY: &str = "turn:node.in.net:3478";
+
+/// Regional relays: UDP/TCP, plus TLS on 443 for restrictive firewalls.
+const EU_RELAYS: [&str; 2] = [
+    "turn:eu.node.in.net:3478",
+    "turns:eu.node.in.net:443?transport=tcp",
+];
+/// Not deployed yet. While this is empty, picking the US region yields the same
+/// list as Auto (see the fallback below) rather than the central relay alone.
+const US_RELAYS: [&str; 0] = [];
+
 pub fn get_turn_credentials(
     login: &str,
     secret: &str,
-    is_premium: bool,
+    region: TurnRegion,
 ) -> Option<TurnCredentials> {
-    if is_premium {
-        // 24 hours validity for the TURN credentials
-        let timestamp = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp();
-        let turn_username = format!("{}:{}", timestamp, login);
+    // 24 hours validity for the TURN credentials
+    let timestamp = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp();
+    let turn_username = format!("{}:{}", timestamp, login);
 
-        use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
-        use hmac::{Hmac, Mac};
-        use sha1::Sha1;
+    use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
 
-        type HmacSha1 = Hmac<Sha1>;
+    type HmacSha1 = Hmac<Sha1>;
 
-        let mut mac = HmacSha1::new_from_slice(secret.as_bytes()).ok()?;
-        mac.update(turn_username.as_bytes());
-        let turn_password = b64.encode(mac.finalize().into_bytes());
+    let mut mac = HmacSha1::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(turn_username.as_bytes());
+    let turn_password = b64.encode(mac.finalize().into_bytes());
 
-        let turn_servers_env = std::env::var("TURN_SERVERS").unwrap_or_default();
-        let uris = if !turn_servers_env.trim().is_empty() {
-            turn_servers_env
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect()
-        } else {
-            vec![
-                "turn:eu.node.in.net:3478".to_string(),
-                "turn:us.node.in.net:3478".to_string(),
-                "turns:eu.node.in.net:443?transport=tcp".to_string(),
-                "turns:us.node.in.net:443?transport=tcp".to_string(),
-            ]
-        };
-
-        Some(TurnCredentials {
-            username: turn_username,
-            credential: turn_password,
-            uris,
-        })
+    let turn_servers_env = std::env::var("TURN_SERVERS").unwrap_or_default();
+    let uris = if !turn_servers_env.trim().is_empty() {
+        // An explicit operator override describes the deployment we actually
+        // run, so it is returned untouched — the region filter never applies.
+        turn_servers_env
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect()
     } else {
-        Some(TurnCredentials {
-            username: "".to_string(),
-            credential: "".to_string(),
-            uris: vec!["stun:stun.l.google.com:19302".to_string()],
-        })
-    }
+        let regional: Vec<String> = match region {
+            TurnRegion::Auto => EU_RELAYS.iter().chain(US_RELAYS.iter()),
+            TurnRegion::Eu => EU_RELAYS.iter().chain([].iter()),
+            TurnRegion::Us => US_RELAYS.iter().chain([].iter()),
+        }
+        .map(|s| (*s).to_string())
+        .collect();
+
+        let mut uris = vec![CENTRAL_RELAY.to_string()];
+        if regional.is_empty() {
+            // The chosen region has no relays deployed; offering the central one
+            // alone would be a downgrade, so fall back to everything we run.
+            uris.extend(
+                EU_RELAYS
+                    .iter()
+                    .chain(US_RELAYS.iter())
+                    .map(|s| s.to_string()),
+            );
+        } else {
+            uris.extend(regional);
+        }
+        uris
+    };
+
+    Some(TurnCredentials {
+        username: turn_username,
+        credential: turn_password,
+        uris,
+    })
 }
 
 #[cfg(test)]
@@ -109,17 +146,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn non_premium_returns_stun_only() {
-        let creds = get_turn_credentials("user", "secret", false).unwrap();
-        assert_eq!(creds.username, "");
-        assert_eq!(creds.credential, "");
-        assert_eq!(creds.uris.len(), 1);
-        assert!(creds.uris[0].starts_with("stun:"), "uri: {}", creds.uris[0]);
-    }
-
-    #[test]
-    fn premium_returns_turn_credentials_with_login() {
-        let creds = get_turn_credentials("alice", "topsecret", true).unwrap();
+    fn returns_turn_credentials_with_login() {
+        let creds = get_turn_credentials("alice", "topsecret", TurnRegion::Auto).unwrap();
         assert!(
             creds.username.contains("alice"),
             "username should contain login: {}",
@@ -137,8 +165,54 @@ mod tests {
     }
 
     #[test]
+    fn eu_region_drops_us_relays_but_keeps_the_central_one() {
+        let creds = get_turn_credentials("alice", "topsecret", TurnRegion::Eu).unwrap();
+        assert!(
+            creds.uris.iter().any(|u| u == CENTRAL_RELAY),
+            "central relay must stay in every region: {:?}",
+            creds.uris
+        );
+        assert!(
+            creds.uris.iter().any(|u| u.contains("eu.node.in.net")),
+            "eu region should offer the eu relays: {:?}",
+            creds.uris
+        );
+        assert!(
+            !creds.uris.iter().any(|u| u.contains("us.node.in.net")),
+            "eu region must not offer the us relays: {:?}",
+            creds.uris
+        );
+    }
+
+    /// US relays are not deployed, so the region falls back to the full list
+    /// instead of leaving the caller with the central relay alone.
+    #[test]
+    fn undeployed_region_falls_back_to_every_relay() {
+        let creds = get_turn_credentials("alice", "topsecret", TurnRegion::Us).unwrap();
+        let auto = get_turn_credentials("alice", "topsecret", TurnRegion::Auto).unwrap();
+        assert!(creds.uris.iter().any(|u| u == CENTRAL_RELAY));
+        assert_eq!(creds.uris, auto.uris);
+    }
+
+    #[test]
+    fn auto_region_offers_every_relay() {
+        let creds = get_turn_credentials("alice", "topsecret", TurnRegion::Auto).unwrap();
+        assert_eq!(creds.uris.len(), 1 + EU_RELAYS.len() + US_RELAYS.len());
+    }
+
+    #[test]
+    fn region_serializes_lowercase_and_defaults_to_auto() {
+        assert_eq!(serde_json::to_string(&TurnRegion::Eu).unwrap(), r#""eu""#);
+        assert_eq!(
+            serde_json::from_str::<TurnRegion>(r#""us""#).unwrap(),
+            TurnRegion::Us
+        );
+        assert_eq!(TurnRegion::default(), TurnRegion::Auto);
+    }
+
+    #[test]
     fn premium_username_format_is_timestamp_colon_login() {
-        let creds = get_turn_credentials("bob", "secret", true).unwrap();
+        let creds = get_turn_credentials("bob", "secret", TurnRegion::Auto).unwrap();
         let parts: Vec<&str> = creds.username.splitn(2, ':').collect();
         assert_eq!(parts.len(), 2, "username should be <ts>:<login>");
         assert_eq!(parts[1], "bob");

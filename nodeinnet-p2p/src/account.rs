@@ -39,6 +39,10 @@ pub struct RegisterRequest {
 pub struct LoginRequest {
     pub login: String,
     pub password: String,
+    /// Relay region the client asks for. Defaulted so that a client predating
+    /// the field still logs in, and a server predating it just ignores it.
+    #[serde(default)]
+    pub region: crate::rtc::TurnRegion,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -57,6 +61,9 @@ pub struct LoginResponse {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RefreshRequest {
     pub refresh_token: String,
+    /// See `LoginRequest::region`.
+    #[serde(default)]
+    pub region: crate::rtc::TurnRegion,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

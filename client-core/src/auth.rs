@@ -1,24 +1,23 @@
 //! HTTP account authentication — GTK-free, reqwest-only, so headless consumers
 //! can share the login/refresh flow without pulling in a UI toolkit.
 
-use nodeinnet_p2p::RefreshResponse;
+use nodeinnet_p2p::{RefreshResponse, TurnRegion};
 use reqwest::Client;
 
 /// Refresh the access token (and session metadata: `ws_url`, `turn`, devices)
 /// using a refresh token against `{api_target}/account/refresh_token`.
-///
-/// If the server does not return TURN credentials and a `login` is provided, a
-/// fallback `TurnCredentials` is synthesized (login as username, access token as
-/// credential) — matching the previous behaviour of both duplicated copies.
 pub async fn refresh_access_token(
     api_target: &str,
     refresh_token: &str,
-    login: Option<&str>,
+    region: TurnRegion,
 ) -> Result<RefreshResponse, String> {
     let client = Client::new();
     match client
         .post(format!("{}/account/refresh_token", api_target))
-        .json(&serde_json::json!({ "refresh_token": refresh_token }))
+        .json(&nodeinnet_p2p::RefreshRequest {
+            refresh_token: refresh_token.to_string(),
+            region,
+        })
         .send()
         .await
     {
@@ -26,21 +25,7 @@ pub async fn refresh_access_token(
             if resp.status().is_success() {
                 let text = resp.text().await.unwrap_or_default();
                 match serde_json::from_str::<RefreshResponse>(&text) {
-                    Ok(mut login_resp) => {
-                        if login_resp.turn.is_none() {
-                            if let Some(l) = login {
-                                login_resp.turn = Some(nodeinnet_p2p::rtc::TurnCredentials {
-                                    username: l.to_string(),
-                                    credential: login_resp.access_token.clone(),
-                                    uris: vec![
-                                        "turn:node.in.net:3478".to_string(),
-                                        "stun:node.in.net:3478".to_string(),
-                                    ],
-                                });
-                            }
-                        }
-                        Ok(login_resp)
-                    }
+                    Ok(login_resp) => Ok(login_resp),
                     Err(e) => Err(format!("Failed to parse response: {}", e)),
                 }
             } else {
@@ -58,6 +43,7 @@ pub async fn login(
     api_target: &str,
     login: &str,
     password: &str,
+    region: TurnRegion,
 ) -> Result<nodeinnet_p2p::LoginResponse, String> {
     let client = Client::new();
     let resp = client
@@ -65,6 +51,7 @@ pub async fn login(
         .json(&nodeinnet_p2p::LoginRequest {
             login: login.to_string(),
             password: password.to_string(),
+            region,
         })
         .send()
         .await
@@ -149,4 +136,18 @@ pub async fn register_device(
     resp.json::<nodeinnet_p2p::Device>()
         .await
         .map_err(|e| format!("Failed to parse device response: {}", e))
+}
+
+/// Persisted relay-region preference. Shared by every client so the key stays
+/// in one place; the server acts on it, the client only stores and sends it.
+const TURN_REGION_KEY: &str = "turn_region";
+
+pub fn turn_region(config: &client_config::AppConfig) -> nodeinnet_p2p::TurnRegion {
+    config.get_or_default(TURN_REGION_KEY)
+}
+
+/// Applies at the next sign-in, since the URI list comes with the login response.
+pub fn set_turn_region(config: &client_config::AppConfig, region: nodeinnet_p2p::TurnRegion) {
+    config.set(TURN_REGION_KEY, region);
+    config.save();
 }
