@@ -254,7 +254,7 @@ async fn handle_incoming_tcp_tunnel(
             nodeinnet_p2p::crypto::sign_p2p_handshake(&private_key_b64, &my_id, initiator_id, ts)?;
 
         let response_hs = P2pMessage::Handshake {
-            node_version: common::version::APP_VERSION.to_string(),
+            node_version: crate::app_version().to_string(),
             timestamp_ms: ts,
             signature: my_signature,
             requested_resources: None,
@@ -381,7 +381,7 @@ pub async fn connect_to_peer_signaling(
 
     let local_port = LOCAL_TCP_PORT.load(std::sync::atomic::Ordering::Relaxed);
     let handshake = P2pMessage::Handshake {
-        node_version: common::version::APP_VERSION.to_string(),
+        node_version: crate::app_version().to_string(),
         timestamp_ms: ts,
         signature,
         requested_resources: None,

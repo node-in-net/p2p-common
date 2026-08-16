@@ -28,6 +28,20 @@ pub fn install_message_handler(
     MESSAGE_HANDLER.set(handler)
 }
 
+static APP_VERSION: OnceLock<String> = OnceLock::new();
+
+/// Declare the version this node reports in its handshake. Peers judge
+/// compatibility by it, so it is the application's version, not this crate's.
+/// Unset it reads as "0.0.0".
+pub fn set_app_version(version: impl Into<String>) {
+    let _ = APP_VERSION.set(version.into());
+}
+
+/// The version to put in a handshake.
+pub fn app_version() -> &'static str {
+    APP_VERSION.get().map(String::as_str).unwrap_or("0.0.0")
+}
+
 /// The installed handler, or `None` when the node only consumes remote
 /// resources and serves nothing of its own.
 pub fn message_handler() -> Option<&'static Arc<dyn MessageHandler>> {
