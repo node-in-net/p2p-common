@@ -1,14 +1,9 @@
-macro_rules! println {
-    ($($arg:tt)*) => {};
-}
-
 use super::manager::NetworkManager;
 use super::types::{NetworkMode, PeerBackoff, get_cooldown_duration};
-use crate::{AppEventHandler, NetCmd, P2pPeerState};
+use crate::NetCmd;
 use nodeinnet_p2p::rtc::{RtcSignal, RtcSignalEnvelope};
 use nodeinnet_p2p::{NodeInfo, P2pMessage};
 use p2p_node::local_mesh::LocalMeshSignal;
-use std::sync::Arc;
 
 impl NetworkManager {
     pub async fn handle_tick(&mut self) {
@@ -87,20 +82,8 @@ impl NetworkManager {
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                         let pc = peer.peer_connection.clone();
-                        println!(
-                            "🧹 [DisconnectPeer] Dropping peer WebRtcClient for {}",
-                            node_id_clone
-                        );
                         drop(peer);
-                        println!(
-                            "⏳ [DisconnectPeer] Calling peer_connection.close() for peer {}...",
-                            node_id_clone
-                        );
                         let _ = pc.close().await;
-                        println!(
-                            "✅ [DisconnectPeer] peer_connection.close() completed for peer {}!",
-                            node_id_clone
-                        );
                         handler_clone.on_p2p_disconnected(node_id_clone).await;
                     });
                 }
@@ -157,20 +140,8 @@ impl NetworkManager {
                         let node_id_clone = node_id.clone();
                         tokio::spawn(async move {
                             let pc = peer.peer_connection.clone();
-                            println!(
-                                "🧹 [DisconnectPeerSession] Dropping peer WebRtcClient for {}",
-                                node_id_clone
-                            );
                             drop(peer);
-                            println!(
-                                "⏳ [DisconnectPeerSession] Calling peer_connection.close() for peer {}...",
-                                node_id_clone
-                            );
                             let _ = pc.close().await;
-                            println!(
-                                "✅ [DisconnectPeerSession] peer_connection.close() completed for peer {}!",
-                                node_id_clone
-                            );
                             handler_clone.on_p2p_disconnected(node_id_clone).await;
                         });
                     }
@@ -331,8 +302,8 @@ impl NetworkManager {
                     // the authenticated session, DataChannel and any video track survive a
                     // transient path change (Wi-Fi↔cellular, NAT rebind) instead of a full
                     // teardown + rebuild.
-                    if ice_restart {
-                        if let Some(existing) = self.active_peers.get(&inbound.from_node_id) {
+                    if ice_restart
+                        && let Some(existing) = self.active_peers.get(&inbound.from_node_id) {
                             self.handler
                                 .on_log(format!(
                                     "♻️ [ICE Restart] In-place renegotiation for {} (session preserved)",
@@ -369,7 +340,6 @@ impl NetworkManager {
                         }
                         // No live session for this peer → fall through and treat this as a
                         // fresh connection offer (rebuild).
-                    }
 
                     let is_duplicate = {
                         if let Some(existing) = self.active_peers.get(&inbound.from_node_id) {
@@ -401,7 +371,7 @@ impl NetworkManager {
                             )
                             .await;
 
-                        if let Some(mut old_client) =
+                        if let Some(old_client) =
                             self.active_peers.remove(&inbound.from_node_id)
                         {
                             self.handler
@@ -411,22 +381,10 @@ impl NetworkManager {
                                 ))
                                 .await;
                             let pc = old_client.peer_connection.clone();
-                            println!(
-                                "🧹 [Inbound Replacement] Dropping old WebRtcClient for {}",
-                                inbound.from_node_id
-                            );
                             drop(old_client);
-                            let peer_id = inbound.from_node_id.clone();
+                            let _peer_id = inbound.from_node_id.clone();
                             tokio::spawn(async move {
-                                println!(
-                                    "⏳ [Inbound Replacement] Calling peer_connection.close() for peer {}...",
-                                    peer_id
-                                );
                                 let _ = pc.close().await;
-                                println!(
-                                    "✅ [Inbound Replacement] peer_connection.close() completed for peer {}!",
-                                    peer_id
-                                );
                             });
                         }
                         match crate::rtc::WebRtcClient::new(
@@ -738,19 +696,10 @@ impl NetworkManager {
                             .await;
                         if let Some(peer) = self.active_peers.remove(&node_id) {
                             let pc = peer.peer_connection.clone();
-                            println!("🧹 [Call Reap] Dropping peer WebRtcClient for {}", node_id);
                             drop(peer);
-                            let peer_id = node_id.clone();
+                            let _peer_id = node_id.clone();
                             tokio::spawn(async move {
-                                println!(
-                                    "⏳ [Call Reap] Calling peer_connection.close() for peer {}...",
-                                    peer_id
-                                );
                                 let _ = pc.close().await;
-                                println!(
-                                    "✅ [Call Reap] peer_connection.close() completed for peer {}!",
-                                    peer_id
-                                );
                             });
                         }
                     } else {
@@ -941,12 +890,11 @@ impl NetworkManager {
                             old_info.name = node.name;
                         }
                     } else {
-                        if node.is_online {
-                            if let Some(backoff) = self.backoff_states.get_mut(&node.id) {
+                        if node.is_online
+                            && let Some(backoff) = self.backoff_states.get_mut(&node.id) {
                                 backoff.attempt_count = 0;
                                 backoff.is_connected = false;
                             }
-                        }
                         self.last_known_nodes.insert(node.id.clone(), node);
                     }
                 }
@@ -1042,7 +990,7 @@ impl NetworkManager {
                 if is_connected {
                     self.handler.on_log(format!("⏭️ [Mesh] Preserving active WebRTC client for {} because it is already Connected", peer_id)).await;
                 } else {
-                    if let Some(mut old_client) = self.active_peers.remove(&peer_id) {
+                    if let Some(old_client) = self.active_peers.remove(&peer_id) {
                         self.handler
                             .on_log(format!(
                                 "🧹 [Mesh] Dropping stale WebRTC client for {} due to new tunnel",
@@ -1050,19 +998,10 @@ impl NetworkManager {
                             ))
                             .await;
                         let pc = old_client.peer_connection.clone();
-                        println!("🧹 [Mesh Stale] Dropping old WebRtcClient for {}", peer_id);
                         drop(old_client);
-                        let node_id = peer_id.clone();
+                        let _node_id = peer_id.clone();
                         tokio::spawn(async move {
-                            println!(
-                                "⏳ [Mesh Stale] Calling peer_connection.close() for peer {}...",
-                                node_id
-                            );
                             let _ = pc.close().await;
-                            println!(
-                                "✅ [Mesh Stale] peer_connection.close() completed for peer {}!",
-                                node_id
-                            );
                         });
                     }
                 }

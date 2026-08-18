@@ -75,6 +75,14 @@ pub enum LocalP2pEvent {
         resource_id: String,
     },
 }
+
+/// An incoming file transfer in flight: destination path, the size the sender
+/// announced, and the Unix mode to restore once the last chunk lands.
+pub type ActiveDownload = (PathBuf, u64, Option<u32>);
+
+/// A live PTY session: stdin sink, resize sink, and the session id.
+pub type ActiveTerminal = (mpsc::Sender<Vec<u8>>, mpsc::Sender<(u16, u16)>, uuid::Uuid);
+
 #[derive(Clone)]
 pub struct NodeContext {
     /// Channel for replies (the app routes it into WebRTC/WebSocket)
@@ -97,10 +105,9 @@ pub struct NodeContext {
 
     // --- State Maps ---
     pub active_uploads: Arc<Mutex<HashMap<uuid::Uuid, PathBuf>>>,
-    pub active_downloads: Arc<Mutex<HashMap<uuid::Uuid, (PathBuf, u64, Option<u32>)>>>,
+    pub active_downloads: Arc<Mutex<HashMap<uuid::Uuid, ActiveDownload>>>,
 
-    pub active_terminals:
-        Arc<Mutex<HashMap<String, (mpsc::Sender<Vec<u8>>, mpsc::Sender<(u16, u16)>, uuid::Uuid)>>>,
+    pub active_terminals: Arc<Mutex<HashMap<String, ActiveTerminal>>>,
     pub active_socks_streams: Arc<Mutex<HashMap<uuid::Uuid, mpsc::Sender<Vec<u8>>>>>,
     pub active_ftp_uploads: Arc<Mutex<HashMap<uuid::Uuid, String>>>,
 
@@ -230,33 +237,33 @@ impl NodeContext {
         // Verify that if a message targets a specific resource_id, the identity actually shares it!
         // ONLY APPLY THIS TO INCOMING REQUESTS! Responses (like SystemInfoResponse) are handled by the Caller
         // and its the Caller's job to verify them, not ours to block them just because we don't own the resource id!
-        let is_response = match &p2p_msg {
+        let is_response = matches!(
+            &p2p_msg,
             P2pMessage::EntriesResponse { .. }
-            | P2pMessage::MetadataResponse { .. }
-            | P2pMessage::CreateDirectoryResponse { .. }
-            | P2pMessage::DeleteEntryResponse { .. }
-            | P2pMessage::RenameEntryResponse { .. }
-            | P2pMessage::SetPermissionsResponse { .. }
-            | P2pMessage::SystemInfoResponse { .. }
-            | P2pMessage::RegistryKeysResponse { .. }
-            | P2pMessage::CreateRegistryKeyResponse { .. }
-            | P2pMessage::DeleteRegistryEntryResponse { .. }
-            | P2pMessage::SetRegistryValueResponse { .. }
-            | P2pMessage::HttpResponseStart { .. }
-            | P2pMessage::HttpResponseChunk { .. }
-            | P2pMessage::HttpResponseComplete { .. }
-            | P2pMessage::SocksConnectResponse { .. }
-            | P2pMessage::SocksData { .. }
-            | P2pMessage::SocksClose { .. }
-            | P2pMessage::FileTransferResponse { .. }
-            | P2pMessage::FileChunk { .. }
-            | P2pMessage::FileTransferComplete { .. }
-            | P2pMessage::TerminalOutput { .. }
-            | P2pMessage::SyncStateResponse { .. }
-            | P2pMessage::RemoteDesktopResponse { .. }
-            | P2pMessage::HandshakeResponse { .. } => true,
-            _ => false,
-        };
+                | P2pMessage::MetadataResponse { .. }
+                | P2pMessage::CreateDirectoryResponse { .. }
+                | P2pMessage::DeleteEntryResponse { .. }
+                | P2pMessage::RenameEntryResponse { .. }
+                | P2pMessage::SetPermissionsResponse { .. }
+                | P2pMessage::SystemInfoResponse { .. }
+                | P2pMessage::RegistryKeysResponse { .. }
+                | P2pMessage::CreateRegistryKeyResponse { .. }
+                | P2pMessage::DeleteRegistryEntryResponse { .. }
+                | P2pMessage::SetRegistryValueResponse { .. }
+                | P2pMessage::HttpResponseStart { .. }
+                | P2pMessage::HttpResponseChunk { .. }
+                | P2pMessage::HttpResponseComplete { .. }
+                | P2pMessage::SocksConnectResponse { .. }
+                | P2pMessage::SocksData { .. }
+                | P2pMessage::SocksClose { .. }
+                | P2pMessage::FileTransferResponse { .. }
+                | P2pMessage::FileChunk { .. }
+                | P2pMessage::FileTransferComplete { .. }
+                | P2pMessage::TerminalOutput { .. }
+                | P2pMessage::SyncStateResponse { .. }
+                | P2pMessage::RemoteDesktopResponse { .. }
+                | P2pMessage::HandshakeResponse { .. }
+        );
 
         if !is_response {
             if let Some(res_id) = p2p_msg.resource_id() {

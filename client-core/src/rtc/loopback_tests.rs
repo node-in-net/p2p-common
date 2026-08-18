@@ -99,8 +99,8 @@ fn spawn_ice_router(
 ) {
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
-            if let NetCmd::Send(WsMessage::RtcSignal(env)) = cmd {
-                if let RtcSignal::IceCandidate {
+            if let NetCmd::Send(WsMessage::RtcSignal(env)) = cmd
+                && let RtcSignal::IceCandidate {
                     candidate,
                     sdp_mid,
                     sdp_mline_index,
@@ -114,7 +114,6 @@ fn spawn_ice_router(
                         buf.lock().await.push((candidate, sdp_mid, sdp_mline_index));
                     }
                 }
-            }
         }
     });
 }
@@ -155,11 +154,10 @@ async fn wait_for_text(
         {
             let guard = inbox.lock().await;
             for m in guard.iter() {
-                if let P2pMessage::TextMessage { text } = m {
-                    if text == expect {
+                if let P2pMessage::TextMessage { text } = m
+                    && text == expect {
                         return true;
                     }
-                }
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

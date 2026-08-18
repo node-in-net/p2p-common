@@ -1,14 +1,14 @@
 use super::manager::NetworkManager;
 use super::types::{NetworkMode, PeerBackoff};
-use crate::{AppEventHandler, NetCmd, WsState};
+use crate::NetCmd;
 use futures_util::{SinkExt, StreamExt};
-use nodeinnet_p2p::{NodeInfo, P2pMessage, WsMessage};
+use nodeinnet_p2p::{NodeInfo, WsMessage};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 impl NetworkManager {
-    pub async fn transition_to_local_mesh_fallback(&mut self, is_disconnection: bool) {
+    pub async fn transition_to_local_mesh_fallback(&mut self, _is_disconnection: bool) {
         self.current_ws_tx = None;
         self.focused_peer = None;
         for task in self.ws_tasks.drain(..) {
@@ -67,13 +67,13 @@ impl NetworkManager {
 
                         // mDNS advertiser and scanner continue running in background
 
-                        let handler_read = handler_conn.clone();
+                        let _handler_read = handler_conn.clone();
                         let net_tx_read = self.net_tx_bg.clone();
 
                         let read_task = tokio::spawn(async move {
                             while let Some(Ok(msg)) = read.next().await {
-                                if let Message::Text(text) = msg {
-                                    if let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) {
+                                if let Message::Text(text) = msg
+                                    && let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) {
                                         match ws_msg {
                                             WsMessage::InboundRtcSignal(inbound) => {
                                                 let _ = net_tx_read
@@ -90,7 +90,6 @@ impl NetworkManager {
                                             _ => {}
                                         }
                                     }
-                                }
                             }
                             // When disconnected, send Disconnect command to central manager to handle state transition
                             let _ = net_tx_read.send(NetCmd::Disconnect).await;
@@ -121,7 +120,7 @@ impl NetworkManager {
                         self.ws_tasks.push(write_task);
                     }
                     res => {
-                        let err_msg = match res {
+                        let _err_msg = match res {
                             Ok(Err(e)) => format!("{}", e),
                             Err(_) => "Timeout".to_string(),
                             _ => unreachable!(),
@@ -195,7 +194,7 @@ impl NetworkManager {
                         if let Some(peer) = self.active_peers.remove(&active_id) {
                             let pc = peer.peer_connection.clone();
                             drop(peer);
-                            let peer_id = active_id.clone();
+                            let _peer_id = active_id.clone();
                             tokio::spawn(async move {
                                 let _ = pc.close().await;
                             });
@@ -224,23 +223,21 @@ impl NetworkManager {
 
                 for node in &nodes {
                     if let Some(old_info) = self.last_known_nodes.get(&node.id) {
-                        if !old_info.is_online && node.is_online {
-                            if let Some(backoff) = self.backoff_states.get_mut(&node.id) {
+                        if !old_info.is_online && node.is_online
+                            && let Some(backoff) = self.backoff_states.get_mut(&node.id) {
                                 backoff.attempt_count = 0;
                                 backoff.is_connected = false;
                             }
-                        }
 
                         if let (Ok(old_res), Ok(new_res)) = (
                             serde_json::to_string(&old_info.resources),
                             serde_json::to_string(&node.resources),
                         ) && old_res != new_res
-                        {
-                            if self.active_peers.contains_key(&node.id) {
+                            && self.active_peers.contains_key(&node.id) {
                                 if let Some(peer) = self.active_peers.remove(&node.id) {
                                     let pc = peer.peer_connection.clone();
                                     drop(peer);
-                                    let peer_id = node.id.clone();
+                                    let _peer_id = node.id.clone();
                                     tokio::spawn(async move {
                                         let _ = pc.close().await;
                                     });
@@ -256,7 +253,6 @@ impl NetworkManager {
                                     let _ = tx.send(NetCmd::Call(target_id)).await;
                                 });
                             }
-                        }
                     }
 
                     if node.app_type != "web" && node.id > self.my_info.id && node.is_online {
@@ -314,7 +310,7 @@ impl NetworkManager {
                         .await;
                 }
 
-                for (id, peer) in self.active_peers.drain() {
+                for (_id, peer) in self.active_peers.drain() {
                     let pc = peer.peer_connection.clone();
                     drop(peer);
                     tokio::spawn(async move {

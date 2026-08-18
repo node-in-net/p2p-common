@@ -46,7 +46,7 @@ pub fn frame_chunks(data: &[u8], max_chunk_payload: usize) -> Vec<Vec<u8>> {
     }
     // When the payload divides evenly into full chunks the receiver never sees a
     // short "final" chunk, so emit an explicit terminator.
-    if full_len % max == 0 {
+    if full_len.is_multiple_of(max) {
         out.push(vec![0u8, 0u8]);
     }
     out

@@ -36,51 +36,43 @@ use webrtc::track::track_local::TrackLocal;
 #[cfg(feature = "feature-rdesk")]
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
+/// Identifies one host-side desktop stream: (peer connection id, resource id).
 #[cfg(feature = "feature-rdesk")]
-static ACTIVE_HOST_STREAMS: OnceLock<
-    Mutex<
-        std::collections::HashMap<
-            (uuid::Uuid, String),
-            (
-                Arc<AtomicBool>,
-                tokio::task::JoinHandle<()>,
-                Arc<webrtc::rtp_transceiver::rtp_sender::RTCRtpSender>,
-            ),
-        >,
-    >,
-> = OnceLock::new();
+type StreamKey = (uuid::Uuid, String);
+/// Stop flag, capture/encode task and the RTP sender feeding that stream.
 #[cfg(feature = "feature-rdesk")]
-static ACTIVE_HOST_ORIGINAL_SIZE: OnceLock<
-    Mutex<std::collections::HashMap<(uuid::Uuid, String), Arc<AtomicBool>>>,
-> = OnceLock::new();
+type HostStream = (
+    Arc<AtomicBool>,
+    tokio::task::JoinHandle<()>,
+    Arc<webrtc::rtp_transceiver::rtp_sender::RTCRtpSender>,
+);
+#[cfg(feature = "feature-rdesk")]
+type HostStreamMap = Mutex<std::collections::HashMap<StreamKey, HostStream>>;
+/// Per-stream "send frames at the original resolution" switch.
+#[cfg(feature = "feature-rdesk")]
+type OriginalSizeMap = Mutex<std::collections::HashMap<StreamKey, Arc<AtomicBool>>>;
+/// Per-stream target encoder bitrate, updated live by the viewer.
+#[cfg(feature = "feature-rdesk")]
+type BitrateMap = Mutex<std::collections::HashMap<StreamKey, Arc<std::sync::atomic::AtomicU32>>>;
 
 #[cfg(feature = "feature-rdesk")]
-fn active_streams() -> &'static Mutex<
-    std::collections::HashMap<
-        (uuid::Uuid, String),
-        (
-            Arc<AtomicBool>,
-            tokio::task::JoinHandle<()>,
-            Arc<webrtc::rtp_transceiver::rtp_sender::RTCRtpSender>,
-        ),
-    >,
-> {
+static ACTIVE_HOST_STREAMS: OnceLock<HostStreamMap> = OnceLock::new();
+#[cfg(feature = "feature-rdesk")]
+static ACTIVE_HOST_ORIGINAL_SIZE: OnceLock<OriginalSizeMap> = OnceLock::new();
+
+#[cfg(feature = "feature-rdesk")]
+fn active_streams() -> &'static HostStreamMap {
     ACTIVE_HOST_STREAMS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 #[cfg(feature = "feature-rdesk")]
-fn active_original_sizes()
--> &'static Mutex<std::collections::HashMap<(uuid::Uuid, String), Arc<AtomicBool>>> {
+fn active_original_sizes() -> &'static OriginalSizeMap {
     ACTIVE_HOST_ORIGINAL_SIZE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 #[cfg(feature = "feature-rdesk")]
-fn active_bitrates() -> &'static Mutex<
-    std::collections::HashMap<(uuid::Uuid, String), Arc<std::sync::atomic::AtomicU32>>,
-> {
-    static ACTIVE_HOST_BITRATES: std::sync::OnceLock<
-        Mutex<std::collections::HashMap<(uuid::Uuid, String), Arc<std::sync::atomic::AtomicU32>>>,
-    > = std::sync::OnceLock::new();
+fn active_bitrates() -> &'static BitrateMap {
+    static ACTIVE_HOST_BITRATES: std::sync::OnceLock<BitrateMap> = std::sync::OnceLock::new();
     ACTIVE_HOST_BITRATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -277,9 +269,10 @@ fn spawn_rdesk_renegotiation(
     });
 }
 
-/// Common handler for all incoming P2P messages over the DataChannel
-async fn handle_incoming_p2p_message(
-    msg_data: &[u8],
+/// Everything an incoming DataChannel message needs besides its payload; stays
+/// the same for the whole lifetime of one peer connection.
+#[derive(Clone)]
+struct IncomingP2pContext {
     handler: std::sync::Arc<dyn crate::AppEventHandler>,
     dc: Arc<RTCDataChannel>,
     node_context: NodeContext,
@@ -288,7 +281,21 @@ async fn handle_incoming_p2p_message(
     net_tx: tokio_mpsc::Sender<crate::NetCmd>,
     peer_connection: Arc<RTCPeerConnection>,
     connection_id: uuid::Uuid,
-) {
+}
+
+/// Common handler for all incoming P2P messages over the DataChannel
+async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
+    let IncomingP2pContext {
+        handler,
+        dc,
+        node_context,
+        target_node_id,
+        last_pong,
+        net_tx,
+        peer_connection,
+        connection_id,
+    } = ctx;
+
     #[cfg(not(feature = "feature-rdesk"))]
     let _ = connection_id;
 
@@ -579,7 +586,7 @@ async fn handle_incoming_p2p_message(
                     let resource_id_cloned = resource_id.clone();
                     let handler_cloned = handler.clone();
                     let peer_conn_cloned = peer_connection.clone();
-                    let dc_cloned = dc.clone();
+                    let _dc_cloned = dc.clone();
 
                     let mut streams = active_streams().lock().await;
                     let key = (connection_id, resource_id_cloned.clone());
@@ -806,11 +813,10 @@ async fn handle_incoming_p2p_message(
 
                                          // If the viewer reported loss (PLI/FIR), make the next encoded
                                          // frame an IDR so the decoder can recover immediately.
-                                         if force_keyframe_encoder.swap(false, Ordering::Relaxed) {
-                                             if let Some(ref mut enc) = encoder {
+                                         if force_keyframe_encoder.swap(false, Ordering::Relaxed)
+                                             && let Some(ref mut enc) = encoder {
                                                  unsafe { enc.raw_api().force_intra_frame(true); }
                                              }
-                                         }
 
                                          let bits = if let Some(ref mut enc) = encoder {
                                              if let Ok(encoded) = enc.encode(&yuv_source) {
@@ -1082,11 +1088,10 @@ async fn handle_incoming_p2p_message(
                         let current_direction = tr.current_direction();
                         let sender = tr.sender().await;
                         let mut has_track = false;
-                        if let Some(s) = sender {
-                            if s.track().await.is_some() {
+                        if let Some(s) = sender
+                            && s.track().await.is_some() {
                                 has_track = true;
                             }
-                        }
                         let _ = handler_sdp.on_log(format!(
                             "🔍 [Transceiver-Diag] Host Transceiver #{}: mid={:?}, direction={:?}, current_direction={:?}, has_track={}",
                             i, mid, direction, current_direction, has_track
@@ -1422,15 +1427,14 @@ impl WebRtcClient {
                             };
                             match pc_delay.create_offer(Some(opts)).await {
                                 Ok(offer) => {
-                                    if pc_delay.set_local_description(offer).await.is_ok() {
-                                        if let Some(local) = pc_delay.local_description().await {
+                                    if pc_delay.set_local_description(offer).await.is_ok()
+                                        && let Some(local) = pc_delay.local_description().await {
                                             let envelope = RtcSignalEnvelope {
                                                 to_node_id: target_delay.clone(),
                                                 signal: RtcSignal::Offer { sdp: local.sdp, ice_restart: true },
                                             };
                                             let _ = net_tx_delay.send(crate::NetCmd::Send(WsMessage::RtcSignal(envelope))).await;
                                         }
-                                    }
                                     // Hold the negotiation lock until the answer restores Stable.
                                     let _ = wait_until_signaling_stable(&pc_delay, tokio::time::Duration::from_secs(5)).await;
                                 }
@@ -1716,12 +1720,22 @@ impl WebRtcClient {
                 let net_tx_task = net_tx_msg.clone();
                 tokio::spawn(async move {
                     let mut assembler = chunking::ChunkAssembler::new();
+                    let msg_ctx = IncomingP2pContext {
+                        handler: handler_msg.clone(),
+                        dc: dc_pong,
+                        node_context: lctx.clone(),
+                        target_node_id: target_node_msg,
+                        last_pong: pong_ref,
+                        net_tx: net_tx_task,
+                        peer_connection: peer_conn_task,
+                        connection_id: connection_id_task,
+                    };
 
                     while let Some(data) = rx_rx.recv().await {
                         let max_c = lctx.peer_max_chunk_size.load(Ordering::Relaxed);
                         match assembler.push(&data, max_c) {
                             chunking::ChunkOutcome::Complete(full_data) => {
-                                handle_incoming_p2p_message(&full_data, handler_msg.clone(), dc_pong.clone(), lctx.clone(), target_node_msg.clone(), pong_ref.clone(), net_tx_task.clone(), peer_conn_task.clone(), connection_id_task).await;
+                                handle_incoming_p2p_message(&full_data, msg_ctx.clone()).await;
                             }
                             chunking::ChunkOutcome::Incomplete | chunking::ChunkOutcome::Ignored => {}
                             chunking::ChunkOutcome::TooSmall(n) => {
@@ -1797,7 +1811,7 @@ impl WebRtcClient {
 
                     // Background P2P keepalive Ping timer.
                     let dc_ping = dc.clone();
-                    let handler_ping = handler.clone();
+                    let _handler_ping = handler.clone();
                     let dc_write_lock_ping = dc_write_lock.clone();
                     tokio::spawn(async move {
                         let mut interval = tokio::time::interval(std::time::Duration::from_secs(P2P_PING_INTERVAL_SECS));
@@ -2032,12 +2046,22 @@ impl WebRtcClient {
             let net_tx_task = net_tx_msg.clone();
             tokio::spawn(async move {
                 let mut assembler = chunking::ChunkAssembler::new();
+                let msg_ctx = IncomingP2pContext {
+                    handler: handler_msg.clone(),
+                    dc: dc_pong,
+                    node_context: lctx.clone(),
+                    target_node_id: target_node_msg,
+                    last_pong: pong_ref,
+                    net_tx: net_tx_task,
+                    peer_connection: peer_conn_task,
+                    connection_id: connection_id_task,
+                };
 
                 while let Some(data) = rx_rx.recv().await {
                     let max_c = lctx.peer_max_chunk_size.load(Ordering::Relaxed);
                     match assembler.push(&data, max_c) {
                         chunking::ChunkOutcome::Complete(full_data) => {
-                            handle_incoming_p2p_message(&full_data, handler_msg.clone(), dc_pong.clone(), lctx.clone(), target_node_msg.clone(), pong_ref.clone(), net_tx_task.clone(), peer_conn_task.clone(), connection_id_task).await;
+                            handle_incoming_p2p_message(&full_data, msg_ctx.clone()).await;
                         }
                         chunking::ChunkOutcome::Incomplete | chunking::ChunkOutcome::Ignored => {}
                         chunking::ChunkOutcome::TooSmall(n) => {
@@ -2211,15 +2235,14 @@ pub async fn get_connection_type_from_pc(
     let stats = peer_connection.get_stats().await;
     let mut active_pair = None;
     for (_, report) in stats.reports.iter() {
-        if let webrtc::stats::StatsReportType::CandidatePair(pair_stats) = report {
-            if format!("{:?}", pair_stats.state) == "Succeeded" {
+        if let webrtc::stats::StatsReportType::CandidatePair(pair_stats) = report
+            && format!("{:?}", pair_stats.state) == "Succeeded" {
                 if pair_stats.nominated {
                     active_pair = Some(pair_stats);
                     break;
                 }
                 active_pair = Some(pair_stats);
             }
-        }
     }
 
     if let Some(pair) = active_pair {
@@ -2277,14 +2300,13 @@ pub fn spawn_connection_type_poller(
                 let mut candidate_info = String::new();
                 let mut active_pair = None;
                 for (_, report) in stats.reports.iter() {
-                    if let webrtc::stats::StatsReportType::CandidatePair(pair_stats) = report {
-                        if format!("{:?}", pair_stats.state) == "Succeeded" {
+                    if let webrtc::stats::StatsReportType::CandidatePair(pair_stats) = report
+                        && format!("{:?}", pair_stats.state) == "Succeeded" {
                             active_pair = Some(pair_stats);
                             if pair_stats.nominated {
                                 break;
                             }
                         }
-                    }
                 }
                 if let Some(pair) = active_pair {
                     let local_cand = stats.reports.get(&pair.local_candidate_id);
@@ -2325,7 +2347,7 @@ impl Drop for WebRtcClient {
     fn drop(&mut self) {
         let pc = self.peer_connection.clone();
         let conn_id = self.connection_id;
-        let node_id = self.target_node_id.clone();
+        let _node_id = self.target_node_id.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let mut streams = active_streams().lock().await;

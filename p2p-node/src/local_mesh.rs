@@ -1,14 +1,10 @@
-macro_rules! println {
-    ($($arg:tt)*) => {};
-}
-
 use base64::{engine::general_purpose, Engine as _};
 use nodeinnet_p2p::{NodeInfo, NodeTopologyInfo, P2pMessage};
 use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
@@ -89,13 +85,8 @@ pub async fn start_tcp_signaling_server(
     private_key_b64: String,
     config: client_config::AppConfig,
 ) -> Result<u16, String> {
-    println!("[P2P Tunnel] start_tcp_signaling_server starting...");
     let existing_port = LOCAL_TCP_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if existing_port > 0 {
-        println!(
-            "[P2P Tunnel] start_tcp_signaling_server already bound to port {}",
-            existing_port
-        );
         return Ok(existing_port);
     }
     let addr = "0.0.0.0:8308".parse::<std::net::SocketAddr>().unwrap();
@@ -104,22 +95,16 @@ pub async fn start_tcp_signaling_server(
 
     if let Err(e) = socket.bind(addr) {
         let err_msg = format!("failed to bind to port 8308: {}", e);
-        println!("[P2P Tunnel] {}", err_msg);
         return Err(err_msg);
     }
     let listener = match socket.listen(1024) {
         Ok(l) => l,
         Err(e) => {
             let err_msg = format!("failed to listen on port 8308: {}", e);
-            println!("[P2P Tunnel] {}", err_msg);
             return Err(err_msg);
         }
     };
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    println!(
-        "[P2P Tunnel] start_tcp_signaling_server bound successfully on port {}",
-        port
-    );
 
     LOCAL_TCP_PORT.store(port, std::sync::atomic::Ordering::Relaxed);
 
@@ -130,32 +115,24 @@ pub async fn start_tcp_signaling_server(
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
-                Ok((stream, addr)) => {
+                Ok((stream, _addr)) => {
                     let my_id = my_id_clone.clone();
-                    let priv_key_noise = priv_key_noise.clone();
+                    let priv_key_noise = priv_key_noise;
                     let private_key_b64 = private_key_b64.clone();
                     let config = config_clone.clone();
 
-                    println!("[P2P Tunnel] Incoming TCP connection from {}", addr);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_incoming_tcp_tunnel(
+                        let _ = handle_incoming_tcp_tunnel(
                             stream,
                             my_id,
                             priv_key_noise,
                             private_key_b64,
                             config,
                         )
-                        .await
-                        {
-                            println!(
-                                "[P2P Tunnel] Incoming handshake with {} failed: {}",
-                                addr, e
-                            );
-                        }
+                        .await;
                     });
                 }
-                Err(e) => {
-                    println!("[P2P Tunnel] TCP accept error: {}. Sleeping 100ms...", e);
+                Err(_e) => {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
             }
@@ -227,9 +204,7 @@ async fn handle_incoming_tcp_tunnel(
     {
         // Authenticate Zero-Trust signature
         let pub_key = nodeinnet_p2p::get_known_public_key(initiator_id).ok_or_else(|| {
-            let err = format!("No known public key for initiator {}", initiator_id);
-            println!("[P2P Tunnel] ❌ {}", err);
-            err
+            format!("No known public key for initiator {}", initiator_id)
         })?;
 
         nodeinnet_p2p::crypto::verify_p2p_handshake(
@@ -240,9 +215,7 @@ async fn handle_incoming_tcp_tunnel(
             timestamp_ms,
         )
         .map_err(|e| {
-            let err = format!("handshake signature verification failed: {}", e);
-            println!("[P2P Tunnel] ❌ {}", err);
-            err
+            format!("handshake signature verification failed: {}", e)
         })?;
 
         // Responder replies with its own Handshake response
@@ -285,10 +258,6 @@ async fn handle_incoming_tcp_tunnel(
             .await
             .insert(initiator_id.clone(), TunnelSession { tx, connection_id });
 
-        println!(
-            "[P2P Tunnel] ✅ Successfully established inbound tunnel from {}",
-            initiator_id
-        );
 
         if let Some(sig_tx) = SIGNAL_TX.get() {
             let _ = sig_tx
@@ -325,14 +294,9 @@ pub async fn connect_to_peer_signaling(
     private_key_b64: String,
     config: client_config::AppConfig,
 ) -> Result<(), String> {
-    println!(
-        "[P2P Tunnel] Connecting to direct signaling target: {} (ID: {})",
-        addr, target_node_id
-    );
     let mut stream = match TcpStream::connect(&addr).await {
         Ok(s) => s,
         Err(e) => {
-            println!("[P2P Tunnel] ❌ TCP connect to {} failed: {}", addr, e);
             return Err(e.to_string());
         }
     };
@@ -433,13 +397,11 @@ pub async fn connect_to_peer_signaling(
                 "Responder node ID mismatch: expected {}, got {}",
                 target_node_id, resp_id
             );
-            println!("[P2P Tunnel] ❌ {}", err);
             return Err(err);
         }
 
         let pub_key = nodeinnet_p2p::get_known_public_key(resp_id).ok_or_else(|| {
             let err = format!("No known public key for responder {}", resp_id);
-            println!("[P2P Tunnel] ❌ {}", err);
             err
         })?;
 
@@ -452,7 +414,6 @@ pub async fn connect_to_peer_signaling(
         )
         .map_err(|e| {
             let err = format!("responder handshake signature verification failed: {}", e);
-            println!("[P2P Tunnel] ❌ {}", err);
             err
         })?;
 
@@ -464,10 +425,6 @@ pub async fn connect_to_peer_signaling(
             .await
             .insert(target_node_id.clone(), TunnelSession { tx, connection_id });
 
-        println!(
-            "[P2P Tunnel] ✅ Successfully established outbound tunnel to {}",
-            target_node_id
-        );
 
         if let Some(sig_tx) = SIGNAL_TX.get() {
             let _ = sig_tx
@@ -513,11 +470,6 @@ async fn run_tunnel_loop(
     connection_id: uuid::Uuid,
     config: client_config::AppConfig,
 ) -> Result<(), String> {
-    println!(
-        "[P2P Tunnel] 🚀 Starting tunnel loop for {} (connection_id: {})",
-        remote_node_id, connection_id
-    );
-    let mut exit_reason = "unknown";
     loop {
         tokio::select! {
             // Outbound message to send
@@ -528,13 +480,11 @@ async fn run_tunnel_loop(
                         let mut enc_buf = vec![0u8; bytes.len() + 1024];
                         if let Ok(enc_len) = session.write_message(&bytes, &mut enc_buf) {
                             if write_packet(&mut stream, &enc_buf[..enc_len]).await.is_err() {
-                                exit_reason = "write_packet failed";
                                 break;
                             }
                         }
                     }
                 } else {
-                    exit_reason = "channel closed (rx None)";
                     break; // Channel closed
                 }
             }
@@ -549,9 +499,7 @@ async fn run_tunnel_loop(
                             }
                         }
                     }
-                    Err(e) => {
-                        exit_reason = "read_packet failed / connection closed";
-                        println!("[P2P Tunnel] ℹ️ read_packet failed for {}: {}", remote_node_id, e);
+                    Err(_e) => {
                         break; // Connection closed
                     }
                 }
@@ -559,28 +507,14 @@ async fn run_tunnel_loop(
         }
     }
 
-    println!(
-        "[P2P Tunnel] 🛑 Exiting tunnel loop for {} (connection_id: {}, reason: {})",
-        remote_node_id, connection_id, exit_reason
-    );
 
     // Cleanup active tunnel on disconnect only if it's still ours!
     let mut tunnels = get_active_tunnels().lock().await;
+    // Only if it is still ours: a newer tunnel may have replaced this one.
     if let Some(current_session) = tunnels.get(&remote_node_id) {
         if current_session.connection_id == connection_id {
-            println!(
-                "[P2P Tunnel] 🧹 Cleaning up tunnel mapping for {} (connection_id: {})",
-                remote_node_id, connection_id
-            );
             tunnels.remove(&remote_node_id);
-        } else {
-            println!("[P2P Tunnel] ⏭️ Skipping cleanup for {} because active connection_id ({}) does not match ours ({})", remote_node_id, current_session.connection_id, connection_id);
         }
-    } else {
-        println!(
-            "[P2P Tunnel] ⏭️ Skipping cleanup for {} because no active tunnel mapping found",
-            remote_node_id
-        );
     }
     Ok(())
 }

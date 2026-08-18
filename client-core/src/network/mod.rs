@@ -97,9 +97,7 @@ pub async fn route_rtc_signal(
         // If a WebSocket signaling server is connected, route immediately over WS instead of blocking
         if current_ws_tx.is_some() {
             let _ = handler
-                .on_log(format!(
-                    "📡 [route_rtc_signal] Cloud WS is connected, breaking tunnel retry loop"
-                ))
+                .on_log("📡 [route_rtc_signal] Cloud WS is connected, breaking tunnel retry loop".to_string())
                 .await;
             break;
         }

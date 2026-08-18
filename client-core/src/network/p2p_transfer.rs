@@ -1,6 +1,6 @@
 use super::manager::NetworkManager;
-use crate::{AppEventHandler, NetCmd};
-use nodeinnet_p2p::rtc::{RtcSignal, RtcSignalEnvelope};
+use crate::NetCmd;
+use nodeinnet_p2p::rtc::RtcSignal;
 use nodeinnet_p2p::{P2pMessage, WsMessage};
 
 impl NetworkManager {

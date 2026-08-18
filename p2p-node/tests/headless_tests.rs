@@ -86,8 +86,10 @@ async fn test_request_system_info_once() {
             match env.message {
                 P2pMessage::SystemInfoResponse { resource_id, info } => {
                     assert_eq!(resource_id, sys_id.to_string());
-                    // Don't assert strict host requirements since environments differ
-                    assert!(info.cpu_cores >= 0);
+                    // Don't assert strict host requirements since environments differ,
+                    // but a host always has at least one core — `>= 0` on a usize
+                    // asserted nothing at all.
+                    assert!(info.cpu_cores > 0);
                 }
                 _ => panic!("Expected SystemInfoResponse but got something else"),
             }
