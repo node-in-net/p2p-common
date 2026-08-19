@@ -1,9 +1,53 @@
 use nodeinnet_p2p::{NodeInfo, P2pMessage};
-use p2p_node::NodeContext;
-use std::sync::atomic::Ordering;
+use p2p_node::{MessageHandler, NodeContext};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+
+/// Stands in for the capability layer.
+///
+/// This crate transports and guards messages; the implementations live in
+/// `p2p-handlers`, which depends on THIS crate. A test here therefore brings its own
+/// handler instead of reaching for the real one — a dev-dependency the other way would
+/// invert the layering into a cycle. What is under test is the routing, not the
+/// capability.
+struct StubHandler {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl MessageHandler for StubHandler {
+    async fn handle(&self, msg: P2pMessage, ctx: NodeContext) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if let P2pMessage::RequestSystemInfo { resource_id } = msg {
+            ctx.send_msg(P2pMessage::SystemInfoResponse {
+                resource_id,
+                info: stub_sys_info(),
+            })
+            .await;
+        }
+    }
+}
+
+fn stub_sys_info() -> nodeinnet_p2p::p2p::SysInfo {
+    nodeinnet_p2p::p2p::SysInfo {
+        hostname: "test-host".to_string(),
+        os_family: "unix".to_string(),
+        os_type: "linux".to_string(),
+        os_version: "0".to_string(),
+        cpu_arch: "x86_64".to_string(),
+        cpu_cores: 4,
+        cpu_usage: 0.0,
+        total_memory: 0,
+        used_memory: 0,
+        total_swap: 0,
+        used_swap: 0,
+        uptime: 0,
+        network_interfaces: Vec::new(),
+    }
+}
 
 fn build_mock_context() -> (NodeContext, Uuid, Uuid, Uuid) {
     let sys_id = Uuid::new_v4();
@@ -62,40 +106,40 @@ fn build_mock_context() -> (NodeContext, Uuid, Uuid, Uuid) {
 }
 
 #[tokio::test]
-async fn test_request_system_info_once() {
+async fn request_is_routed_to_the_installed_handler() {
     let (ctx, sys_id, _, _) = build_mock_context();
     let (out_tx, mut out_rx) = mpsc::channel(100);
     // Replace outgoing tx with one we can read from
     let mut ctx2 = ctx.clone();
     ctx2.outgoing_tx = out_tx;
 
-    // We must ensure the session_keys map used for MAC has our token, otherwise mac = None which our test ignores
-    // Actually the app uses send_msg which computes JSON MAC.
+    // send_msg signs anything carrying a resource_id, so the key must be present.
     ctx2.session_keys
         .lock()
         .await
         .insert(sys_id.to_string(), "sys_token".to_string());
 
-    let msg = P2pMessage::RequestSystemInfo {
+    // The handler slot is a process-wide OnceLock: one per test binary, so this file
+    // keeps a single test that needs it.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _ = p2p_node::install_message_handler(Arc::new(StubHandler {
+        calls: calls.clone(),
+    }));
+
+    ctx2.process_message(P2pMessage::RequestSystemInfo {
         resource_id: sys_id.to_string(),
-    };
-    ctx2.process_message(msg).await;
+    })
+    .await;
 
     match tokio::time::timeout(Duration::from_secs(2), out_rx.recv()).await {
-        Ok(Some(nodeinnet_p2p::OutboundP2pPayload::Message(env))) => {
-            match env.message {
-                P2pMessage::SystemInfoResponse { resource_id, info } => {
-                    assert_eq!(resource_id, sys_id.to_string());
-                    // Don't assert strict host requirements since environments differ,
-                    // but a host always has at least one core — `>= 0` on a usize
-                    // asserted nothing at all.
-                    assert!(info.cpu_cores > 0);
-                }
-                _ => panic!("Expected SystemInfoResponse but got something else"),
+        Ok(Some(nodeinnet_p2p::OutboundP2pPayload::Message(env))) => match env.message {
+            P2pMessage::SystemInfoResponse { resource_id, .. } => {
+                assert_eq!(resource_id, sys_id.to_string(), "response lost the resource id");
             }
-        }
-        _ => panic!("Timed out"),
+            other => panic!("expected SystemInfoResponse, got {other:?}"),
+        },
+        _ => panic!("the request never reached the handler"),
     }
-}
 
-// Ignore other broken mock tests as they simply duplicate the issue and timeout.
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "handler should run exactly once");
+}
