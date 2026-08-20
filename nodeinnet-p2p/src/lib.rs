@@ -76,7 +76,12 @@ pub fn set_ws_base(url: &str) {
 ///    harnesses have always pointed a build at a dev server;
 /// 3. [`API_BASE`], compiled in per profile.
 pub fn api_base() -> String {
-    if let Some(url) = ENDPOINT.read().unwrap_or_else(|e| e.into_inner()).api.clone() {
+    if let Some(url) = ENDPOINT
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .api
+        .clone()
+    {
         return url;
     }
     std::env::var("NODEINNET_API")
@@ -90,7 +95,12 @@ pub fn api_base() -> String {
 /// Same order as [`api_base()`]: an explicit [`set_ws_base()`], then `NODEINNET_WS`, then
 /// what the server said — which is what every ordinary run uses.
 pub fn ws_base(advertised: &str) -> String {
-    if let Some(url) = ENDPOINT.read().unwrap_or_else(|e| e.into_inner()).ws.clone() {
+    if let Some(url) = ENDPOINT
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .ws
+        .clone()
+    {
         return url;
     }
     std::env::var("NODEINNET_WS")
