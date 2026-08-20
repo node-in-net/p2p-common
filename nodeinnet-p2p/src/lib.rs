@@ -23,11 +23,86 @@ pub use p2p::*;
 pub use rtc::*;
 pub use ws::*;
 
-/// Base URL of the node.in.net service.
+/// Base URL of the node.in.net service, as compiled in.
+///
+/// Prefer [`api_base()`] over reading this directly — it is only the last fallback, and a
+/// consumer that reads the constant cannot be pointed anywhere else.
 #[cfg(debug_assertions)]
 pub const API_BASE: &str = "http://127.0.0.1:8030";
 #[cfg(not(debug_assertions))]
 pub const API_BASE: &str = "https://node.in.net";
+
+/// Where the WebSocket lives, when the caller wants something other than what the server
+/// advertised. Empty by default — see [`ws_base()`].
+static ENDPOINT: std::sync::RwLock<Endpoint> = std::sync::RwLock::new(Endpoint {
+    api: None,
+    ws: None,
+});
+
+struct Endpoint {
+    api: Option<String>,
+    ws: Option<String>,
+}
+
+/// Point this process at a different node.in.net.
+///
+/// [`API_BASE`] is fixed at compile time — a debug build targets a local dev server, a
+/// release build the live service — so a shipped binary can otherwise never be aimed
+/// elsewhere. That blocks two real needs: a test suite that drives a RELEASE binary against
+/// a local server, and a user who runs their own.
+///
+/// Call this before signing in; it affects every later [`api_base()`] read. Passing an
+/// empty string clears the override and restores the compiled-in default.
+pub fn set_api_base(url: &str) {
+    let mut ep = ENDPOINT.write().unwrap_or_else(|e| e.into_inner());
+    ep.api = non_empty(url);
+}
+
+/// Override the signalling socket the server advertises in its login response.
+///
+/// A dev server usually advertises the address it is reachable at from OUTSIDE, which is
+/// not the one a client on the same machine can dial. Empty clears the override.
+pub fn set_ws_base(url: &str) {
+    let mut ep = ENDPOINT.write().unwrap_or_else(|e| e.into_inner());
+    ep.ws = non_empty(url);
+}
+
+/// The base URL to reach the account API at.
+///
+/// Resolution order, most specific first:
+///
+/// 1. whatever [`set_api_base()`] was last given — a setting, a command-line flag, a test;
+/// 2. the `NODEINNET_API` environment variable, which is how the apps and their test
+///    harnesses have always pointed a build at a dev server;
+/// 3. [`API_BASE`], compiled in per profile.
+pub fn api_base() -> String {
+    if let Some(url) = ENDPOINT.read().unwrap_or_else(|e| e.into_inner()).api.clone() {
+        return url;
+    }
+    std::env::var("NODEINNET_API")
+        .ok()
+        .and_then(|v| non_empty(&v))
+        .unwrap_or_else(|| API_BASE.to_string())
+}
+
+/// The signalling socket to dial, given what the server advertised.
+///
+/// Same order as [`api_base()`]: an explicit [`set_ws_base()`], then `NODEINNET_WS`, then
+/// what the server said — which is what every ordinary run uses.
+pub fn ws_base(advertised: &str) -> String {
+    if let Some(url) = ENDPOINT.read().unwrap_or_else(|e| e.into_inner()).ws.clone() {
+        return url;
+    }
+    std::env::var("NODEINNET_WS")
+        .ok()
+        .and_then(|v| non_empty(&v))
+        .unwrap_or_else(|| advertised.to_string())
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
 
 /// One peer on the network, as announced to the signalling server and to other
 /// peers, together with the resources it shares.

@@ -268,9 +268,30 @@ pub async fn run_network_manager(
     }
 
     let (signal_tx, mut signal_rx) = tokio_mpsc::channel(100);
-    let _ = p2p_node::local_mesh::SIGNAL_TX.set(signal_tx);
+    // `SIGNAL_TX` is a process-wide `OnceLock`. A SECOND manager in the same process finds
+    // it already claimed, `set` hands the sender straight back inside the `Err`, and unless
+    // we hold on to it the sender is dropped here — which closes `signal_rx` and makes
+    // `recv()` return `None` immediately, forever. Keeping it alive costs nothing and turns
+    // a hot loop into a channel that is merely never written to.
+    let mut _unused_signal_tx = None;
+    if let Err(returned) = p2p_node::local_mesh::SIGNAL_TX.set(signal_tx) {
+        let _ = handler
+            .on_log(
+                "⚠️ [Network] local-mesh signal channel was already claimed by an earlier \
+                 network manager in this process; this one will not receive local-mesh signals"
+                    .to_string(),
+            )
+            .await;
+        _unused_signal_tx = Some(returned);
+    }
 
     let mut reconnect_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    // Disabled once the local-mesh channel closes. Without the guard that branch stays
+    // permanently ready — `recv()` on a closed channel completes instantly — and the loop
+    // spins at 100% of a core doing nothing. The `net_rx` branch below breaks on `None`;
+    // this one must not, because local-mesh signals going away is no reason to stop serving
+    // `NetCmd`s.
+    let mut local_mesh_open = true;
 
     loop {
         tokio::select! {
@@ -284,9 +305,10 @@ pub async fn run_network_manager(
                     break;
                 }
             }
-            signal_opt = signal_rx.recv() => {
-                if let Some(signal) = signal_opt {
-                    manager.handle_local_mesh_signal(signal).await;
+            signal_opt = signal_rx.recv(), if local_mesh_open => {
+                match signal_opt {
+                    Some(signal) => manager.handle_local_mesh_signal(signal).await,
+                    None => local_mesh_open = false,
                 }
             }
         }
