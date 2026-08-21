@@ -1,10 +1,7 @@
-//! node.in.net account and session types — the REST contract between a client
-//! and the service (registration, login, token refresh, device list).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// One registered device of a user, with its shared resources as BSON bytes.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Device {
     pub id: String,
@@ -39,8 +36,6 @@ pub struct RegisterRequest {
 pub struct LoginRequest {
     pub login: String,
     pub password: String,
-    /// Relay region the client asks for. Defaulted so that a client predating
-    /// the field still logs in, and a server predating it just ignores it.
     #[serde(default)]
     pub region: crate::rtc::TurnRegion,
 }
@@ -61,7 +56,6 @@ pub struct LoginResponse {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RefreshRequest {
     pub refresh_token: String,
-    /// See `LoginRequest::region`.
     #[serde(default)]
     pub region: crate::rtc::TurnRegion,
 }

@@ -34,7 +34,6 @@ pub async fn route_rtc_signal(
         ))
         .await;
 
-    // Retry checking for active TCP tunnels if the WS signaling is offline (LAN mesh mode)
     for attempt in 1..=10 {
         if let Some(tunnels) = p2p_node::local_mesh::ACTIVE_TCP_TUNNELS.get() {
             let tunnels_map = tunnels.lock().await;
@@ -94,7 +93,6 @@ pub async fn route_rtc_signal(
                 .await;
         }
 
-        // If a WebSocket signaling server is connected, route immediately over WS instead of blocking
         if current_ws_tx.is_some() {
             let _ = handler
                 .on_log("📡 [route_rtc_signal] Cloud WS is connected, breaking tunnel retry loop".to_string())
@@ -180,7 +178,6 @@ pub fn start_network_thread(
     private_key: String,
     config: client_config::AppConfig,
 ) {
-    // Standalone-app mode: run the node on its own OS thread + runtime.
     thread::spawn(move || {
         let rt = Runtime::new().unwrap();
         rt.block_on(run_network_manager(
@@ -194,11 +191,6 @@ pub fn start_network_thread(
     });
 }
 
-/// Drive a node's `NetworkManager` event loop on the CURRENT tokio runtime,
-/// returning when its `net_rx` channel closes. This is the reusable core of a
-/// running node: [`start_network_thread`] wraps it in a dedicated thread+runtime
-/// for a standalone app, while [`spawn_network_task`] runs it as a lightweight
-/// task so one process can host many independent nodes (load tests).
 pub async fn run_network_manager(
     mut net_rx: tokio_mpsc::Receiver<NetCmd>,
     net_tx: tokio_mpsc::Sender<NetCmd>,
@@ -215,7 +207,6 @@ pub async fn run_network_manager(
         config.clone(),
     );
 
-    // Load persisted peers on startup
     let peers: std::collections::HashMap<String, nodeinnet_p2p::PeerConfig> =
         config.get_or_default("peers");
     let mut cached_peers_log = format!(
@@ -259,7 +250,6 @@ pub async fn run_network_manager(
         let _ = manager.handler.on_update_nodes(all_nodes).await;
     }
 
-    // Start local mesh TCP signaling server and mDNS scanner/advertiser if configured.
     let enable_local_discovery = config
         .get::<bool>("app.enable_local_discovery")
         .unwrap_or(false);
@@ -268,11 +258,7 @@ pub async fn run_network_manager(
     }
 
     let (signal_tx, mut signal_rx) = tokio_mpsc::channel(100);
-    // `SIGNAL_TX` is a process-wide `OnceLock`. A SECOND manager in the same process finds
-    // it already claimed, `set` hands the sender straight back inside the `Err`, and unless
-    // we hold on to it the sender is dropped here — which closes `signal_rx` and makes
-    // `recv()` return `None` immediately, forever. Keeping it alive costs nothing and turns
-    // a hot loop into a channel that is merely never written to.
+    // `SIGNAL_TX` is a process-wide `OnceLock`. A SECOND manager in the same process finds.
     let mut _unused_signal_tx = None;
     if let Err(returned) = p2p_node::local_mesh::SIGNAL_TX.set(signal_tx) {
         let _ = handler
@@ -286,11 +272,6 @@ pub async fn run_network_manager(
     }
 
     let mut reconnect_interval = tokio::time::interval(std::time::Duration::from_secs(5));
-    // Disabled once the local-mesh channel closes. Without the guard that branch stays
-    // permanently ready — `recv()` on a closed channel completes instantly — and the loop
-    // spins at 100% of a core doing nothing. The `net_rx` branch below breaks on `None`;
-    // this one must not, because local-mesh signals going away is no reason to stop serving
-    // `NetCmd`s.
     let mut local_mesh_open = true;
 
     loop {
@@ -315,8 +296,6 @@ pub async fn run_network_manager(
     }
 }
 
-/// Spawn a node as a task on the current tokio runtime (for hosting many
-/// independent nodes in one process, e.g. load tests). Returns its `JoinHandle`.
 pub fn spawn_network_task(
     net_rx: tokio_mpsc::Receiver<NetCmd>,
     net_tx: tokio_mpsc::Sender<NetCmd>,

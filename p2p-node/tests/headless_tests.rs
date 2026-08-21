@@ -6,13 +6,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-/// Stands in for the capability layer.
-///
-/// This crate transports and guards messages; the implementations live in
-/// `p2p-handlers`, which depends on THIS crate. A test here therefore brings its own
-/// handler instead of reaching for the real one — a dev-dependency the other way would
-/// invert the layering into a cycle. What is under test is the routing, not the
-/// capability.
 struct StubHandler {
     calls: Arc<AtomicUsize>,
 }
@@ -99,7 +92,6 @@ fn build_mock_context() -> (NodeContext, Uuid, Uuid, Uuid) {
     let config = client_config::AppConfig::new("p2p-node-headless-test");
 
     let ctx = NodeContext::new(out_tx, log_tx, event_tx, info, config);
-    // Explicitly bypass zero-trust checks for test endpoints
     ctx.is_authenticated.store(true, Ordering::Relaxed);
 
     (ctx, sys_id, fs_id, term_id)
@@ -109,7 +101,6 @@ fn build_mock_context() -> (NodeContext, Uuid, Uuid, Uuid) {
 async fn request_is_routed_to_the_installed_handler() {
     let (ctx, sys_id, _, _) = build_mock_context();
     let (out_tx, mut out_rx) = mpsc::channel(100);
-    // Replace outgoing tx with one we can read from
     let mut ctx2 = ctx.clone();
     ctx2.outgoing_tx = out_tx;
 
@@ -119,8 +110,6 @@ async fn request_is_routed_to_the_installed_handler() {
         .await
         .insert(sys_id.to_string(), "sys_token".to_string());
 
-    // The handler slot is a process-wide OnceLock: one per test binary, so this file
-    // keeps a single test that needs it.
     let calls = Arc::new(AtomicUsize::new(0));
     let _ = p2p_node::install_message_handler(Arc::new(StubHandler {
         calls: calls.clone(),

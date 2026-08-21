@@ -1,5 +1,3 @@
-//! The WebSocket protocol between a client and the node.in.net signalling
-//! server: peer discovery, WebRTC signal relay, device notifications.
 
 use serde::{Deserialize, Serialize};
 
@@ -7,18 +5,14 @@ use crate::account::Device;
 use crate::rtc::{InboundRtcSignal, RtcSignalEnvelope};
 use crate::NodeInfo;
 
-/// Common container for every message the client and server exchange over WebSocket.
-/// Replaces the vaguer `WsPayload`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "cmd", content = "data")]
 pub enum WsMessage {
-    // --- System commands ---
     Ping,
     Pong {
         timestamp: u64,
     },
 
-    // --- Client-originated commands ---
     #[serde(rename = "list_nodes")]
     ListNodes,
     #[serde(rename = "rtc_signal")]
@@ -26,7 +20,6 @@ pub enum WsMessage {
     #[serde(rename = "update_node_info")]
     UpdateNodeInfo(NodeInfo),
 
-    // --- Server-originated commands ---
     #[serde(rename = "nodes_list")]
     NodesList {
         nodes: Vec<NodeInfo>,

@@ -36,10 +36,8 @@ use webrtc::track::track_local::TrackLocal;
 #[cfg(feature = "feature-rdesk")]
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
-/// Identifies one host-side desktop stream: (peer connection id, resource id).
 #[cfg(feature = "feature-rdesk")]
 type StreamKey = (uuid::Uuid, String);
-/// Stop flag, capture/encode task and the RTP sender feeding that stream.
 #[cfg(feature = "feature-rdesk")]
 type HostStream = (
     Arc<AtomicBool>,
@@ -48,10 +46,8 @@ type HostStream = (
 );
 #[cfg(feature = "feature-rdesk")]
 type HostStreamMap = Mutex<std::collections::HashMap<StreamKey, HostStream>>;
-/// Per-stream "send frames at the original resolution" switch.
 #[cfg(feature = "feature-rdesk")]
 type OriginalSizeMap = Mutex<std::collections::HashMap<StreamKey, Arc<AtomicBool>>>;
-/// Per-stream target encoder bitrate, updated live by the viewer.
 #[cfg(feature = "feature-rdesk")]
 type BitrateMap = Mutex<std::collections::HashMap<StreamKey, Arc<std::sync::atomic::AtomicU32>>>;
 
@@ -76,11 +72,7 @@ fn active_bitrates() -> &'static BitrateMap {
     ACTIVE_HOST_BITRATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-/// How often to send a P2P keepalive Ping over the DataChannel.
 const P2P_PING_INTERVAL_SECS: u64 = 15;
-/// Drop the link if no Pong is seen within this window (~3 missed pings). Faster
-/// dead-peer detection than the old 180s so recovery (ICE restart / rebuild)
-/// kicks in promptly.
 const P2P_PONG_TIMEOUT_MS: u64 = 45_000;
 
 #[cfg(feature = "feature-rdesk")]
@@ -121,7 +113,6 @@ impl<'a> YUVSource for SimpleYuvSource<'a> {
     }
 }
 
-// --- STRICT BINARY CHUNK FRAMING (2-byte header) ---
 async fn send_chunked_binary(
     dc: &Arc<webrtc::data_channel::RTCDataChannel>,
     data: &[u8],
@@ -129,23 +120,16 @@ async fn send_chunked_binary(
     handler: &Arc<dyn crate::AppEventHandler>,
     write_lock: &Arc<Mutex<()>>,
 ) -> Result<(), String> {
-    // Serialize the whole chunk sequence: concurrent writers on the same
-    // DataChannel would otherwise interleave framed chunks and corrupt the
-    // receiver's sequential reassembly (see `chunking` docs / regression test).
+    // Concurrent writers would interleave chunks and corrupt reassembly.
     let _write_guard = write_lock.lock().await;
 
     let send_start = std::time::Instant::now();
     let full_len = data.len();
 
-    // Framing (incl. the trailing zero terminator on exact-multiple payloads) is
-    // shared with the receive-side reassembler and unit-tested in `chunking`.
     let frames = chunking::frame_chunks(data, max_chunk_payload);
     let chunks_count = frames.len();
 
-    // Backpressure instead of a fixed per-chunk delay: send at full speed while
-    // the SCTP send buffer is drained, and only pause a large burst when it fills
-    // up. Small messages (a single chunk) never wait, so control traffic — pings,
-    // input events, SDP — stays snappy even during a big transfer.
+    // Backpressure instead of a fixed per-chunk delay, so small messages never wait.
     const HIGH_WATER: usize = 1024 * 1024; // start pausing above 1 MB buffered
     const LOW_WATER: usize = 256 * 1024; // resume once drained below 256 KB
     for frame in frames {
@@ -186,8 +170,6 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-/// Poll the PeerConnection's signaling state until it is `Stable` (no pending
-/// offer/answer), or the timeout elapses. Returns `true` if it reached `Stable`.
 async fn wait_until_signaling_stable(
     pc: &Arc<RTCPeerConnection>,
     timeout: std::time::Duration,
@@ -205,13 +187,7 @@ async fn wait_until_signaling_stable(
     }
 }
 
-/// Spawn a serialized Remote Desktop SDP renegotiation: create an offer covering
-/// the current track set and send it as a `RemoteDesktopSdpOffer`.
-///
-/// The whole offer→answer transaction is guarded by `negotiation_lock` and framed
-/// by `wait_until_signaling_stable`, so concurrent start/stop requests (or an ICE
-/// restart) queue instead of racing on `set_local_description` (glare). Shared by
-/// the track-add and track-remove paths.
+/// Spawn a serialized Remote Desktop SDP renegotiation: create an offer covering the.
 #[cfg(feature = "feature-rdesk")]
 fn spawn_rdesk_renegotiation(
     pc: Arc<RTCPeerConnection>,
@@ -221,7 +197,6 @@ fn spawn_rdesk_renegotiation(
 ) {
     tokio::spawn(async move {
         let _guard = node_context.negotiation_lock.lock().await;
-        // Wait out any prior in-flight offer/answer before starting a new one.
         if !wait_until_signaling_stable(&pc, std::time::Duration::from_secs(5)).await {
             let _ = handler
                 .on_log(format!(
@@ -256,8 +231,6 @@ fn spawn_rdesk_renegotiation(
                         ))
                         .await;
                 }
-                // Hold the lock until the answer returns us to Stable so the next
-                // queued renegotiation starts from a clean state.
                 let _ = wait_until_signaling_stable(&pc, std::time::Duration::from_secs(5)).await;
             }
             Err(e) => {
@@ -269,8 +242,6 @@ fn spawn_rdesk_renegotiation(
     });
 }
 
-/// Everything an incoming DataChannel message needs besides its payload; stays
-/// the same for the whole lifetime of one peer connection.
 #[derive(Clone)]
 struct IncomingP2pContext {
     handler: std::sync::Arc<dyn crate::AppEventHandler>,
@@ -283,7 +254,6 @@ struct IncomingP2pContext {
     connection_id: uuid::Uuid,
 }
 
-/// Common handler for all incoming P2P messages over the DataChannel
 async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
     let IncomingP2pContext {
         handler,
@@ -312,7 +282,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
     {
         let p2p_msg = envelope.message;
 
-        // Log the JSON equivalent of the BSON for debugging what actually arrived
         if !matches!(p2p_msg, P2pMessage::Pong(_)) && !matches!(p2p_msg, P2pMessage::Ping(_)) {
             let hex_str = msg_data
                 .iter()
@@ -340,7 +309,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             }
         }
 
-        // --- Intercept ResourcesResponse to store Session Keys ---
         if let P2pMessage::HandshakeResponse { ref resources } = p2p_msg {
             let mut log_str = "🔑 [AUTH] Received HandshakeResponse. Key saved:\n".to_string();
             let mut keys = node_context.session_keys.lock().await;
@@ -356,13 +324,11 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             drop(types);
             handler.on_log(log_str).await;
 
-            // Mark node as successfully authenticated after receiving session keys
             let was_authenticated = node_context.is_authenticated.swap(true, Ordering::SeqCst);
             handler
                 .on_peer_state_changed(target_node_id.clone(), crate::P2pPeerState::Connected)
                 .await;
 
-            // Notify network thread that connection succeeded to reset backoff
             let _ = net_tx
                 .send(crate::NetCmd::PeerConnected(
                     target_node_id.clone(),
@@ -370,8 +336,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                 ))
                 .await;
 
-            // Symmetric Resource Exchange: if we are the initiator (was_authenticated was false),
-            // send our resources to the responder so they can see us online and access our shares.
             if !was_authenticated {
                 spawn_connection_type_poller(
                     peer_connection.clone(),
@@ -434,7 +398,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                 ))
                 .await;
 
-            // Register public keys so we can trust these peers if we connect to them
             nodeinnet_p2p::update_known_public_keys(nodes);
             node_context.config.update(
                 "peers",
@@ -453,7 +416,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             );
             node_context.config.save();
 
-            // Notify network thread to merge these nodes into last_known_nodes and UI
             let _ = net_tx
                 .send(crate::NetCmd::MergeNodesList(nodes.clone()))
                 .await;
@@ -464,8 +426,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             return;
         }
 
-        // --- CRYPTO CAPABILITY ENFORCEMENT ---
-        // If the message targets a resource, verify the MAC
         if let Some(res_id) = p2p_msg.resource_id() {
             let keys = node_context.session_keys.lock().await;
             if let Some(token) = keys.get(res_id) {
@@ -504,11 +464,9 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             }
         }
 
-        // --- ZERO TRUST ENFORCEMENT ---
         if !node_context.is_authenticated.load(Ordering::Relaxed)
             && !matches!(p2p_msg, P2pMessage::Handshake { .. })
         {
-            // Handshake might be processing concurrently. Wait up to 5 seconds for it to finish!
             let mut auth_successful = false;
             for _ in 0..25 {
                 if node_context.is_authenticated.load(Ordering::Relaxed) {
@@ -532,7 +490,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             }
         }
 
-        // --- Intercept Remote Desktop / SDP renegotiation ---
         #[cfg(feature = "feature-rdesk")]
         if let P2pMessage::RemoteDesktopRequest {
             ref resource_id,
@@ -567,7 +524,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                     }
                 }
 
-                // Approve Response
                 let _ = node_context
                     .outgoing_tx
                     .send(nodeinnet_p2p::OutboundP2pPayload::UnsignedMessage(
@@ -582,7 +538,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                     .await;
 
                 if start {
-                    // Spawn host capture/encode thread
                     let resource_id_cloned = resource_id.clone();
                     let handler_cloned = handler.clone();
                     let peer_conn_cloned = peer_connection.clone();
@@ -620,9 +575,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                                  let bitrate_flag = Arc::new(std::sync::atomic::AtomicU32::new(target_bitrate));
                                  let bitrate_capture = bitrate_flag.clone();
 
-                                 // --- RTCP feedback loop: force an IDR keyframe when the viewer reports
-                                 // packet loss via PLI/FIR. Without this, a lost packet corrupts the
-                                 // viewer's decoder until the next periodic IDR (frozen/garbled screen).
                                  let force_keyframe = Arc::new(AtomicBool::new(false));
                                  let force_keyframe_encoder = force_keyframe.clone();
                                  let rtcp_sender = rtp_sender.clone();
@@ -636,8 +588,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                                          if rtcp_stop.load(Ordering::Relaxed) {
                                              break;
                                          }
-                                         // 1s timeout so we periodically re-check the stop flag even when
-                                         // the viewer sends no RTCP.
                                          match tokio::time::timeout(std::time::Duration::from_secs(1), rtcp_sender.read_rtcp()).await {
                                              Ok(Ok((packets, _))) => {
                                                  let want_key = packets.iter().any(|p| {
@@ -712,7 +662,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                                              continue;
                                          };
 
-                                          // Compute dynamic target dimensions capped at 1280
                                           let mut target_w = frame.width;
                                           let mut target_h = frame.height;
                                           if !original_size_capture.load(Ordering::Relaxed) {
@@ -729,7 +678,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                                                   }
                                               }
                                           }
-                                         // OpenH264 requires even width/height
                                          if target_w % 2 != 0 {
                                              target_w -= 1;
                                          }
@@ -738,9 +686,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                                          }
 
                                          let target_bitrate = bitrate_capture.load(Ordering::Relaxed);
-                                         // Recreate the encoder only when the resolution changes. A
-                                         // bitrate-only change is applied live via SetOption below, so
-                                         // adaptive bitrate no longer forces an IDR/hitch every step.
                                          if encoder.is_none() || current_width != target_w || current_height != target_h {
                                              let _ = handler_capture.on_log(format!(
                                                  "📺 Initializing/Recreating OpenH264 encoder: native {}x{}, target {}x{}, bitrate {} bps",
@@ -765,7 +710,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                                                  }
                                              }
                                          } else if current_bitrate != target_bitrate {
-                                             // Live bitrate adjustment on the running encoder (no recreation).
                                              if let Some(ref mut enc) = encoder {
                                                  let mut info = openh264_sys2::SBitrateInfo {
                                                      iLayer: openh264_sys2::SPATIAL_LAYER_ALL,
@@ -811,8 +755,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                                              v: v_plane,
                                          };
 
-                                         // If the viewer reported loss (PLI/FIR), make the next encoded
-                                         // frame an IDR so the decoder can recover immediately.
                                          if force_keyframe_encoder.swap(false, Ordering::Relaxed)
                                              && let Some(ref mut enc) = encoder {
                                                  unsafe { enc.raw_api().force_intra_frame(true); }
@@ -875,7 +817,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                                  active_original_sizes().lock().await.insert(key.clone(), original_size_flag);
                                  active_bitrates().lock().await.insert(key.clone(), bitrate_flag);
 
-                                // Perform serialized SDP Offer renegotiation for the added track.
                                 spawn_rdesk_renegotiation(
                                     peer_conn_cloned.clone(),
                                     node_context.clone(),
@@ -889,7 +830,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                         }
                     }
                 } else {
-                    // start = false
                     let mut streams = active_streams().lock().await;
                     let key = (connection_id, resource_id.clone());
                     handler
@@ -915,7 +855,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                         handler.on_log(format!("⚠️ [Stop Request Error] No active stream found for key: {:?}. Active keys: {:?}", key, current_keys)).await;
                     }
 
-                    // Perform serialized SDP Offer renegotiation after track removal.
                     spawn_rdesk_renegotiation(
                         peer_connection.clone(),
                         node_context.clone(),
@@ -1080,7 +1019,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                 } else {
                     let _ = handler_sdp.on_log(format!("🟢 SDP Renegotiation successful! Dynamic video stream negotiated for resource {}", resource_id_cloned)).await;
 
-                    // Log transceiver status to verify dynamic audio/video media flow direction and codecs
                     let transceivers = peer_conn_sdp.get_transceivers().await;
                     for (i, tr) in transceivers.iter().enumerate() {
                         let mid = tr.mid().await;
@@ -1107,13 +1045,10 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             return;
         }
 
-        // Forward the message to the UI thread
         handler.on_p2p_message(p2p_msg.clone()).await;
 
-        // Some messages are handled by the p2p-node library
         node_context.process_message(p2p_msg.clone()).await;
 
-        // The remaining basic messages (Ping/Pong/Goodbye) are handled by the UI app core
         core::handle_core_message(
             p2p_msg,
             handler,
@@ -1137,14 +1072,12 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
     }
 }
 
-/// Base client managing a WebRTC connection
 pub struct WebRtcClient {
     pub peer_connection: Arc<RTCPeerConnection>,
     pub target_node_id: String,
     pub connection_id: uuid::Uuid,
     my_info: NodeInfo,
     handler: std::sync::Arc<dyn crate::AppEventHandler>,
-    /// Handle to the open data channel so we can write into it
     pub data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     pub node_context: NodeContext,
     pub pending_messages: Arc<Mutex<Vec<nodeinnet_p2p::SecuredP2pEnvelope>>>,
@@ -1154,7 +1087,6 @@ pub struct WebRtcClient {
 }
 
 impl WebRtcClient {
-    /// Initialize a new WebRTC PeerConnection
     pub async fn new(
         handler: std::sync::Arc<dyn crate::AppEventHandler>,
         net_tx: tokio_mpsc::Sender<NetCmd>,
@@ -1181,7 +1113,6 @@ impl WebRtcClient {
 
         let node_context = NodeContext::new(out_tx, log_tx, local_evt_tx, my_info.clone(), config);
 
-        // Proxy p2p library logs into the UI app
         let handler_logs = handler.clone();
         tokio::spawn(async move {
             while let Some(log_msg) = log_rx.recv().await {
@@ -1189,13 +1120,11 @@ impl WebRtcClient {
             }
         });
 
-        // 1. Initialize the base WebRTC API with default codecs (for H.264 support)
         let mut m = webrtc::api::media_engine::MediaEngine::default();
         m.register_default_codecs()
             .expect("Failed to register default codecs");
         let api = APIBuilder::new().with_media_engine(m).build();
 
-        // 2. Configure STUN and TURN servers for NAT/CGNAT traversal
         let mut ice_servers = Vec::new();
         let mut turn_msg = String::new();
 
@@ -1230,10 +1159,8 @@ impl WebRtcClient {
             ..Default::default()
         };
 
-        // 3. Create the PeerConnection itself
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
-        // --- Setup Track reception callback ---
         #[cfg(feature = "feature-rdesk")]
         let pc_track = Arc::downgrade(&peer_connection);
         #[cfg(feature = "feature-rdesk")]
@@ -1258,8 +1185,7 @@ impl WebRtcClient {
                     let mut bgra_buf = Vec::new();
                     let mut accumulated_compressed_size = 0;
                     let track_ssrc = t.ssrc();
-                    // Rate-limit keyframe requests so a burst of decode failures doesn't
-                    // flood the host with PLIs.
+                    // Rate-limited so a burst of failures cannot flood the host.
                     let mut last_pli_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
 
                      loop {
@@ -1316,10 +1242,6 @@ impl WebRtcClient {
                                              }
                                              Ok(None) => {}
                                              Err(_) => {
-                                                 // Decode failure — packets were likely lost and
-                                                 // corrupted the stream. Ask the host for a keyframe
-                                                 // (rate-limited) so we recover immediately instead of
-                                                 // staying garbled until the next periodic IDR.
                                                  let now = std::time::Instant::now();
                                                  if now.duration_since(last_pli_at) >= std::time::Duration::from_millis(200) {
                                                      last_pli_at = now;
@@ -1356,7 +1278,6 @@ impl WebRtcClient {
             })
         }));
 
-        // --- Wire up the state machine ---
         let handler_state = handler.clone();
         let target_node_state = target_node_id.clone();
         let net_tx_state = net_tx.clone();
@@ -1406,19 +1327,15 @@ impl WebRtcClient {
                     tokio::spawn(async move {
                         use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
-                        // 1) Let WebRTC's own ICE try to self-heal a transient blip first.
                         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
                         if pc_delay.connection_state() != RTCPeerConnectionState::Disconnected {
                             return; // recovered on its own — no teardown, session preserved
                         }
 
-                        // 2) Still down: attempt an ICE restart instead of tearing down.
-                        // Only the deterministic offerer (smaller node id) initiates, so the
-                        // two peers never glare; the other side renegotiates in place.
+                        // Only the smaller node id initiates, so the two never glare.
                         let am_offerer = my_id_delay < target_delay;
                         if am_offerer {
                             let _ = handler_delay.on_log(format!("♻️ [ICE Restart] Peer {} Disconnected — attempting ICE restart (session preserved)", target_delay)).await;
-                            // Serialize with any Remote Desktop renegotiation on this PC.
                             let _neg_guard = lctx_delay.negotiation_lock.lock().await;
                             let _ = wait_until_signaling_stable(&pc_delay, tokio::time::Duration::from_secs(5)).await;
                             let opts = webrtc::peer_connection::offer_answer_options::RTCOfferOptions {
@@ -1435,7 +1352,6 @@ impl WebRtcClient {
                                             };
                                             let _ = net_tx_delay.send(crate::NetCmd::Send(WsMessage::RtcSignal(envelope))).await;
                                         }
-                                    // Hold the negotiation lock until the answer restores Stable.
                                     let _ = wait_until_signaling_stable(&pc_delay, tokio::time::Duration::from_secs(5)).await;
                                 }
                                 Err(e) => {
@@ -1446,8 +1362,6 @@ impl WebRtcClient {
                             let _ = handler_delay.on_log(format!("⏳ [ICE Restart] Peer {} Disconnected — awaiting peer's restart offer", target_delay)).await;
                         }
 
-                        // 3) Escalate: if ICE restart didn't restore the connection within a
-                        // further grace window, tear down so AutoConnect rebuilds cleanly.
                         tokio::time::sleep(tokio::time::Duration::from_secs(12)).await;
                         let st = pc_delay.connection_state();
                         if st == RTCPeerConnectionState::Disconnected || st == RTCPeerConnectionState::Failed {
@@ -1460,7 +1374,6 @@ impl WebRtcClient {
             })
         }));
 
-        // --- ICE Connection State Listener ---
         let handler_ice = handler.clone();
         let target_node_ice = target_node_id.clone();
         peer_connection.on_ice_connection_state_change(Box::new(
@@ -1481,7 +1394,6 @@ impl WebRtcClient {
         let data_channel_store: Arc<Mutex<Option<Arc<RTCDataChannel>>>> =
             Arc::new(Mutex::new(None));
 
-        // Background pipe: forward p2p-node messages into WebRTC
         let dc_store_for_pipe = data_channel_store.clone();
         let pm_for_pipe = pending_messages.clone();
         let handler_for_our_rx_loop = handler.clone();
@@ -1489,12 +1401,10 @@ impl WebRtcClient {
         let node_context_for_pipe = node_context.clone();
         tokio::spawn(async move {
             while let Some(mut payload) = out_rx.recv().await {
-                // Determine if we have an UnsignedMessage to auth & sign
                 if let nodeinnet_p2p::OutboundP2pPayload::UnsignedMessage(msg) = payload {
                     let mac = if let Some(res_id) = msg.resource_id() {
                         let mut key_hex = None;
                         for _ in 0..100 {
-                            // Wait up to 5 seconds for auth
                             if !node_context_for_pipe
                                 .is_authenticated
                                 .load(Ordering::Relaxed)
@@ -1543,7 +1453,6 @@ impl WebRtcClient {
                     match payload {
                         nodeinnet_p2p::OutboundP2pPayload::Message(msg) => {
                             if let Ok(bson_bytes) = nodeinnet_p2p::p2p::to_bson_vec(&msg) {
-                                // Log outgoing message structure!
                                 if !matches!(msg.message, P2pMessage::Ping(_))
                                     && !matches!(msg.message, P2pMessage::Pong(_))
                                 {
@@ -1610,7 +1519,6 @@ impl WebRtcClient {
                             }
                         }
                         nodeinnet_p2p::OutboundP2pPayload::Binary(b) => {
-                            // Fallback RAW binary handling (for WebVPN etc) -- we must frame it too to avoid mangling receiver
                             let max_c = peer_max_chunk_size.load(Ordering::Relaxed);
                             let max_c = if max_c == 0 { 10240 } else { max_c };
                             let _ = send_chunked_binary(
@@ -1637,7 +1545,6 @@ impl WebRtcClient {
             }
         });
 
-        // 4. Send local ICE candidates to the remote side
         let net_tx_ice = net_tx.clone();
         let target_ice = target_node_id.clone();
         peer_connection.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
@@ -1662,7 +1569,6 @@ impl WebRtcClient {
             })
         }));
 
-        // 5. Handle incoming Data Channels (on the callee side)
         let handler_dc = handler.clone();
         let dc_store_clone = data_channel_store.clone();
         let node_ctx_dc = node_context.clone();
@@ -1713,10 +1619,8 @@ impl WebRtcClient {
                 let peer_conn_task = peer_conn_for_dc.clone();
                 let connection_id_task = connection_id_dc_inner;
 
-                // Queue for handling SCTP message pieces sequentially
                 let (rx_tx, mut rx_rx) = tokio_mpsc::unbounded_channel::<bytes::Bytes>();
 
-                // Background task to assemble chunks and drop them sequentially
                 let net_tx_task = net_tx_msg.clone();
                 tokio::spawn(async move {
                     let mut assembler = chunking::ChunkAssembler::new();
@@ -1778,7 +1682,6 @@ impl WebRtcClient {
                     ).await;
                     handler.on_peer_state_changed(target_node_ping.clone(), crate::P2pPeerState::Authenticating).await;
 
-                    // Send Handshake to prove identity (but request 0 resources)
                     let priv_key = d_private_key_open.clone();
                     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                     let signature = nodeinnet_p2p::crypto::sign_p2p_handshake(&priv_key, &my_info.id, &target_node_ping, ts)
@@ -1800,7 +1703,6 @@ impl WebRtcClient {
                         let _ = send_chunked_binary(&dc, &bson_bytes, max_c, &handler, &dc_write_lock).await;
                     }
 
-                    // Flush every queued command
                     let mut queue = pending_queue.lock().await;
                     for msg in queue.drain(..) {
                         if let Ok(bson_bytes) = nodeinnet_p2p::p2p::to_bson_vec(&msg) {
@@ -1809,7 +1711,6 @@ impl WebRtcClient {
                         }
                     }
 
-                    // Background P2P keepalive Ping timer.
                     let dc_ping = dc.clone();
                     let _handler_ping = handler.clone();
                     let dc_write_lock_ping = dc_write_lock.clone();
@@ -1874,15 +1775,12 @@ impl WebRtcClient {
         })
     }
 
-    /// Creates an SDP Offer to initiate the connection
     pub async fn create_offer(&self) -> Result<String, webrtc::Error> {
-        // Create the Data Channel BEFORE generating the Offer! This makes WebRTC emit ice-ufrag and the m= sections.
         let data_channel = self
             .peer_connection
             .create_data_channel("nodeinnet_data", None)
             .await?;
 
-        // Store the DataChannel in the client state
         *self.data_channel.lock().await = Some(data_channel.clone());
 
         let dc_clone_for_send = data_channel.clone();
@@ -1921,7 +1819,6 @@ impl WebRtcClient {
                         crate::P2pPeerState::Authenticating,
                     )
                     .await;
-                // Send a Handshake when the channel opens
                 let priv_key = d_private_key_open.clone();
                 let my_id = my_node_id_open.clone();
                 let ts = std::time::SystemTime::now()
@@ -1961,7 +1858,6 @@ impl WebRtcClient {
                         .await;
                 }
 
-                // Flush every queued command
                 let mut queue = pending_queue.lock().await;
                 for msg in queue.drain(..) {
                     if let Ok(bson_bytes) = nodeinnet_p2p::p2p::to_bson_vec(&msg) {
@@ -1972,7 +1868,6 @@ impl WebRtcClient {
                     }
                 }
 
-                // Background P2P keepalive Ping timer.
                 let dc_ping = dc.clone();
                 let handler_ping = handler.clone();
                 let dc_write_lock_ping = dc_write_lock.clone();
@@ -2039,10 +1934,8 @@ impl WebRtcClient {
             let peer_conn_task = pc_clone.clone();
             let connection_id_task = connection_id_msg;
 
-            // Queue for handling SCTP message pieces sequentially
             let (rx_tx, mut rx_rx) = tokio_mpsc::unbounded_channel::<bytes::Bytes>();
 
-            // Background task to assemble chunks and drop them sequentially
             let net_tx_task = net_tx_msg.clone();
             tokio::spawn(async move {
                 let mut assembler = chunking::ChunkAssembler::new();
@@ -2106,19 +1999,15 @@ impl WebRtcClient {
             })
         }));
 
-        // 1. Generate the offer
         let offer = self.peer_connection.create_offer(None).await?;
 
-        // 2. Mandatory: set it as our local description
         self.peer_connection
             .set_local_description(offer.clone())
             .await?;
 
-        // 3. Return the SDP string to be sent over WebSocket
         Ok(offer.sdp)
     }
 
-    /// Accepts an Offer from another node and generates an Answer
     pub async fn accept_offer_and_answer(
         &self,
         offer_sdp: String,
@@ -2127,12 +2016,10 @@ impl WebRtcClient {
         offer_desc.sdp_type = RTCSdpType::Offer;
         offer_desc.sdp = offer_sdp;
 
-        // 1. Set the received Offer as the remote description
         self.peer_connection
             .set_remote_description(offer_desc)
             .await?;
 
-        // 2. Generate the Answer and set it as the local description
         let answer = self.peer_connection.create_answer(None).await?;
         self.peer_connection
             .set_local_description(answer.clone())
@@ -2149,7 +2036,6 @@ impl WebRtcClient {
         maps.get(res_type).cloned()
     }
 
-    /// Applies the received SDP Answer (on the initiator side)
     pub async fn apply_answer(&self, answer_sdp: String) -> Result<(), webrtc::Error> {
         let mut answer_desc = RTCSessionDescription::default();
         answer_desc.sdp_type = RTCSdpType::Answer;
@@ -2160,7 +2046,6 @@ impl WebRtcClient {
             .await
     }
 
-    /// Adds an ICE candidate received from the remote side
     pub async fn add_ice_candidate(
         &self,
         candidate: String,
@@ -2188,7 +2073,6 @@ impl WebRtcClient {
         self.peer_connection.add_ice_candidate(init).await
     }
 
-    /// Sends a P2P message over the DataChannel
     pub async fn send_p2p_message(&self, msg: P2pMessage) -> Result<(), String> {
         let p2p_str = format!("{:?}", msg);
         let msg_log = if p2p_str.len() > 100 {
@@ -2341,7 +2225,6 @@ pub fn spawn_connection_type_poller(
     });
 }
 
-/// Tears down the screen-capture tasks this connection started.
 #[cfg(feature = "feature-rdesk")]
 impl Drop for WebRtcClient {
     fn drop(&mut self) {

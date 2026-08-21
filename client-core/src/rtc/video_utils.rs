@@ -65,10 +65,7 @@ pub fn bgra_to_yuv420p(
     out
 }
 
-/// Convert a decoded YUV420p frame into BGRA (`out_bgra` must be `width*height*4`
-/// bytes). SIMD-accelerated via the `yuv` crate. Uses **limited-range** BT.601 to
-/// match `bgra_to_yuv420p` (our encoder), so colors round-trip correctly — the
-/// previous hand-rolled path decoded with full-range math and washed colors out.
+/// Convert a decoded YUV420p frame into BGRA (`out_bgra` must be `width*height*4`.
 #[cfg(feature = "simd-yuv")]
 #[allow(clippy::too_many_arguments)]
 pub fn yuv420p_to_bgra(
@@ -103,8 +100,6 @@ pub fn yuv420p_to_bgra(
     }
 }
 
-/// Scalar fallback for builds without the `simd-yuv` feature. Limited-range
-/// BT.601 to stay consistent with the SIMD path and the encoder.
 #[cfg(not(feature = "simd-yuv"))]
 #[allow(clippy::too_many_arguments)]
 pub fn yuv420p_to_bgra(
@@ -178,7 +173,6 @@ mod tests {
         assert!(!yuv.is_empty());
     }
 
-    /// Fill a `w*h` BGRA buffer with one solid color.
     fn solid_bgra(w: usize, h: usize, b: u8, g: u8, r: u8) -> Vec<u8> {
         let mut bgra = vec![0u8; w * h * 4];
         for px in bgra.chunks_mut(4) {
@@ -190,7 +184,6 @@ mod tests {
         bgra
     }
 
-    /// Decode a packed yuv420p buffer (as produced by `bgra_to_yuv420p`) to BGRA.
     fn decode(yuv: &[u8], w: usize, h: usize) -> Vec<u8> {
         let y_size = w * h;
         let uv_size = (w / 2) * (h / 2);
@@ -226,8 +219,6 @@ mod tests {
     #[test]
     fn bgra_yuv_roundtrip_keeps_channel_order() {
         let (w, h) = (16, 16);
-        // Pure red then pure blue must decode with the dominant channel intact
-        // (guards against B/R swaps between encode and decode).
         let red = decode(
             &bgra_to_yuv420p(&solid_bgra(w, h, 0, 0, 255), w, h, w, h),
             w,
@@ -280,7 +271,6 @@ pub fn bgra_to_yuv420p(
                 let g = bgra[src_idx + 1] as i32;
                 let r = bgra[src_idx + 2] as i32;
 
-                // BT.601 integer conversion
                 let y = (r * 77 + g * 150 + b * 29) >> 8;
                 y_plane[row_start_y + dx] = y.clamp(0, 255) as u8;
 

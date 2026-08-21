@@ -36,7 +36,6 @@ pub fn get_active_tunnels() -> &'static Mutex<HashMap<String, TunnelSession>> {
     ACTIVE_TCP_TUNNELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-// Length-prefixed IO helpers
 async fn read_packet<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<Vec<u8>, std::io::Error> {
@@ -79,7 +78,6 @@ fn get_noise_private_key(priv_b64: &str) -> Result<[u8; 32], String> {
     Ok(key)
 }
 
-// Start TCP listener for incoming Noise signaling tunnels
 pub async fn start_tcp_signaling_server(
     my_id: String,
     private_key_b64: String,
@@ -148,7 +146,6 @@ async fn handle_incoming_tcp_tunnel(
     private_key_b64: String,
     config: client_config::AppConfig,
 ) -> Result<(), String> {
-    // Noise XX Handshake as Responder
     let builder = snow::Builder::new("Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap());
     let mut noise = builder
         .local_private_key(&priv_key_noise)
@@ -163,7 +160,6 @@ async fn handle_incoming_tcp_tunnel(
         .read_message(&pkt1, &mut payload)
         .map_err(|e| format!("failed reading Msg 1 payload: {}", e))?;
 
-    // Write Msg 2
     let mut buf = vec![0u8; 65535];
     let len2 = noise
         .write_message(&[], &mut buf)
@@ -181,7 +177,6 @@ async fn handle_incoming_tcp_tunnel(
 
     let mut session = noise.into_transport_mode().map_err(|e| e.to_string())?;
 
-    // Receive Initiator Handshake (containing Zero-Trust payload)
     let encrypted_hs = read_packet(&mut stream)
         .await
         .map_err(|e| format!("failed reading encrypted handshake: {}", e))?;
@@ -202,7 +197,6 @@ async fn handle_incoming_tcp_tunnel(
         ..
     } = envelope.message
     {
-        // Authenticate Zero-Trust signature
         let pub_key = nodeinnet_p2p::get_known_public_key(initiator_id).ok_or_else(|| {
             format!("No known public key for initiator {}", initiator_id)
         })?;
@@ -218,7 +212,6 @@ async fn handle_incoming_tcp_tunnel(
             format!("handshake signature verification failed: {}", e)
         })?;
 
-        // Responder replies with its own Handshake response
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -250,7 +243,6 @@ async fn handle_incoming_tcp_tunnel(
             .await
             .map_err(|e| e.to_string())?;
 
-        // Register tunnel
         let connection_id = uuid::Uuid::new_v4();
         let (tx, rx) = mpsc::channel(100);
         get_active_tunnels()
@@ -265,7 +257,6 @@ async fn handle_incoming_tcp_tunnel(
                 .await;
         }
 
-        // Spawn active tunnel loop
         let initiator_id_clone = initiator_id.clone();
         let config_clone = config.clone();
         tokio::spawn(async move {
@@ -308,7 +299,6 @@ pub async fn connect_to_peer_signaling(
         .build_initiator()
         .map_err(|e| e.to_string())?;
 
-    // Write Msg 1
     let mut buf = vec![0u8; 65535];
     let len1 = noise
         .write_message(&[], &mut buf)
@@ -325,7 +315,6 @@ pub async fn connect_to_peer_signaling(
         .read_message(&pkt2, &mut payload)
         .map_err(|e| format!("Msg 2 payload error: {}", e))?;
 
-    // Write Msg 3
     let len3 = noise
         .write_message(&[], &mut buf)
         .map_err(|e| format!("Msg 3 write error: {}", e))?;
@@ -335,7 +324,6 @@ pub async fn connect_to_peer_signaling(
 
     let mut session = noise.into_transport_mode().map_err(|e| e.to_string())?;
 
-    // Send Handshake
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -417,7 +405,6 @@ pub async fn connect_to_peer_signaling(
             err
         })?;
 
-        // Register tunnel
         let connection_id = uuid::Uuid::new_v4();
         let (tx, rx) = mpsc::channel(100);
         get_active_tunnels()
@@ -432,7 +419,6 @@ pub async fn connect_to_peer_signaling(
                 .await;
         }
 
-        // Spawn active tunnel loop
         let target_node_id_clone = target_node_id.clone();
         let config_clone = config.clone();
         tokio::spawn(async move {
@@ -448,7 +434,6 @@ pub async fn connect_to_peer_signaling(
             .await;
         });
 
-        // Request topology on successful connection to exchange peer lists
         if let Some(tunnels) = ACTIVE_TCP_TUNNELS.get() {
             if let Some(session) = tunnels.lock().await.get(&target_node_id) {
                 let _ = session.tx.send(P2pMessage::RequestTopology).await;
@@ -472,7 +457,6 @@ async fn run_tunnel_loop(
 ) -> Result<(), String> {
     loop {
         tokio::select! {
-            // Outbound message to send
             msg_opt = rx.recv() => {
                 if let Some(msg) = msg_opt {
                     let envelope = nodeinnet_p2p::SecuredP2pEnvelope { mac: None, message: msg };
@@ -508,9 +492,7 @@ async fn run_tunnel_loop(
     }
 
 
-    // Cleanup active tunnel on disconnect only if it's still ours!
     let mut tunnels = get_active_tunnels().lock().await;
-    // Only if it is still ours: a newer tunnel may have replaced this one.
     if let Some(current_session) = tunnels.get(&remote_node_id) {
         if current_session.connection_id == connection_id {
             tunnels.remove(&remote_node_id);
@@ -546,7 +528,6 @@ async fn handle_tunnel_message(
                         .await;
                 }
             } else {
-                // Route to target peer (Intermediate Routing / Phase 4)
                 let tunnels = get_active_tunnels().lock().await;
                 if let Some(session) = tunnels.get(&target_node_id) {
                     let routed_msg = P2pMessage::RtcSignal {
@@ -562,7 +543,6 @@ async fn handle_tunnel_message(
         }
 
         P2pMessage::RequestTopology => {
-            // Reply with active connections
             let tunnels = get_active_tunnels().lock().await;
             let mut peers = Vec::new();
             for peer_id in tunnels.keys() {
@@ -593,13 +573,11 @@ async fn handle_tunnel_message(
         }
 
         P2pMessage::ResponseTopology { peers } => {
-            // Merge topologies
             for peer in peers {
                 if peer.id == my_id {
                     continue;
                 }
 
-                // 1. Update public keys & names
                 if nodeinnet_p2p::get_known_public_key(&peer.id).is_none() {
                     let node_info = NodeInfo {
                         id: peer.id.clone(),
@@ -649,7 +627,6 @@ async fn handle_tunnel_message(
 mod tests {
     use super::*;
 
-    // ── get_noise_private_key ─────────────────────────────────────────────────
 
     #[test]
     fn valid_32_byte_key_decodes_and_hashes() {
@@ -686,7 +663,6 @@ mod tests {
         assert_ne!(h1, h2);
     }
 
-    // ── read_packet / write_packet roundtrip ──────────────────────────────────
 
     #[tokio::test]
     async fn write_then_read_packet_roundtrip() {
@@ -707,7 +683,6 @@ mod tests {
         assert!(read_back.is_empty());
     }
 
-    // ── get_active_tunnels ────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn active_tunnels_initializes_and_is_lockable() {

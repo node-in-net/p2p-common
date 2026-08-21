@@ -62,7 +62,6 @@ impl NetworkManager {
                 }
             }
             NetworkMode::WebSocketConnecting => {
-                // Do not auto-connect or do fallback ticks when initial WS connection is in progress
             }
         }
     }
@@ -78,7 +77,6 @@ impl NetworkManager {
                     let handler_clone = self.handler.clone();
                     let node_id_clone = node_id.clone();
                     tokio::spawn(async move {
-                        // Give network stack 500ms to send frames before hard close
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                         let pc = peer.peer_connection.clone();
@@ -91,7 +89,6 @@ impl NetworkManager {
                     self.focused_peer = None;
                 }
 
-                // Update backoff states
                 let backoff = self
                     .backoff_states
                     .entry(node_id.clone())
@@ -298,10 +295,6 @@ impl NetworkManager {
                         ))
                         .await;
 
-                    // In-session ICE restart: renegotiate on the EXISTING PeerConnection so
-                    // the authenticated session, DataChannel and any video track survive a
-                    // transient path change (Wi-Fi↔cellular, NAT rebind) instead of a full
-                    // teardown + rebuild.
                     if ice_restart
                         && let Some(existing) = self.active_peers.get(&inbound.from_node_id) {
                             self.handler
@@ -338,8 +331,6 @@ impl NetworkManager {
                             }
                             return;
                         }
-                        // No live session for this peer → fall through and treat this as a
-                        // fresh connection offer (rebuild).
 
                     let is_duplicate = {
                         if let Some(existing) = self.active_peers.get(&inbound.from_node_id) {

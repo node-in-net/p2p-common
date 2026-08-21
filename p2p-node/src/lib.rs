@@ -9,19 +9,13 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::{mpsc, Mutex};
 
-/// Serves a capability a peer asked for. This crate transports and guards
-/// messages; it does not read files or open terminals. An application installs
-/// an implementation via [`install_message_handler`].
 #[async_trait::async_trait]
 pub trait MessageHandler: Send + Sync {
-    /// Handle one message that already passed the resource-access check.
     async fn handle(&self, msg: P2pMessage, ctx: NodeContext);
 }
 
 static MESSAGE_HANDLER: OnceLock<Arc<dyn MessageHandler>> = OnceLock::new();
 
-/// Install the handler serving capabilities to peers. Call once, before
-/// connecting; later calls are ignored and return the handler already in place.
 pub fn install_message_handler(
     handler: Arc<dyn MessageHandler>,
 ) -> Result<(), Arc<dyn MessageHandler>> {
@@ -30,26 +24,18 @@ pub fn install_message_handler(
 
 static APP_VERSION: OnceLock<String> = OnceLock::new();
 
-/// Declare the version this node reports in its handshake. Peers judge
-/// compatibility by it, so it is the application's version, not this crate's.
-/// Unset it reads as "0.0.0".
 pub fn set_app_version(version: impl Into<String>) {
     let _ = APP_VERSION.set(version.into());
 }
 
-/// The version to put in a handshake.
 pub fn app_version() -> &'static str {
     APP_VERSION.get().map(String::as_str).unwrap_or("0.0.0")
 }
 
-/// The installed handler, or `None` when the node only consumes remote
-/// resources and serves nothing of its own.
 pub fn message_handler() -> Option<&'static Arc<dyn MessageHandler>> {
     MESSAGE_HANDLER.get()
 }
 
-/// Cross-platform node context: all abstract data-sending channels
-/// and the internal stream states (terminals, file downloads).
 
 #[derive(Clone, Debug)]
 pub enum LocalP2pEvent {
@@ -76,34 +62,24 @@ pub enum LocalP2pEvent {
     },
 }
 
-/// An incoming file transfer in flight: destination path, the size the sender
-/// announced, and the Unix mode to restore once the last chunk lands.
 pub type ActiveDownload = (PathBuf, u64, Option<u32>);
 
-/// A live PTY session: stdin sink, resize sink, and the session id.
 pub type ActiveTerminal = (mpsc::Sender<Vec<u8>>, mpsc::Sender<(u16, u16)>, uuid::Uuid);
 
 #[derive(Clone)]
 pub struct NodeContext {
-    /// Channel for replies (the app routes it into WebRTC/WebSocket)
     pub outgoing_tx: mpsc::Sender<nodeinnet_p2p::OutboundP2pPayload>,
 
-    /// Channel for text logs going to the UI or stdout
     pub log_tx: mpsc::Sender<String>,
 
-    /// Channel for local UI events (progress etc.)
     pub local_event_tx: mpsc::Sender<LocalP2pEvent>,
 
-    /// Current node state
     pub my_info: NodeInfo,
 
-    /// Zero-Trust Auth State Tracker
     pub is_authenticated: Arc<AtomicBool>,
 
-    /// Maps ResourceType to the remote peer's assigned resource_id
     pub remote_resources: Arc<Mutex<HashMap<nodeinnet_p2p::p2p::ResourceType, String>>>,
 
-    // --- State Maps ---
     pub active_uploads: Arc<Mutex<HashMap<uuid::Uuid, PathBuf>>>,
     pub active_downloads: Arc<Mutex<HashMap<uuid::Uuid, ActiveDownload>>>,
 
@@ -114,26 +90,16 @@ pub struct NodeContext {
     /// Session-bound Cryptographic Tokens (Resource ID -> HMAC Token)
     pub session_keys: Arc<Mutex<HashMap<String, String>>>,
 
-    /// Reassembly buffers for chunked WebRTC Binary BSON transfers (Peer ID -> Incomplete BSON Bytes)
     pub rx_binary_buffers: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 
-    /// Max chunk size announced by the remote peer during handshake
     pub peer_max_chunk_size: Arc<std::sync::atomic::AtomicUsize>,
     pub discovered_ips: Arc<Mutex<Vec<String>>>,
     pub config: client_config::AppConfig,
 
-    /// Serializes all framed writes to this connection's WebRTC DataChannel.
-    /// Multiple tasks (the outgoing pipe, the ping timer, ping/pong replies, the
-    /// handshake) share one DataChannel; without this lock their length-prefixed
-    /// chunks interleave on the wire and the receiver's sequential reassembler
-    /// corrupts messages. Held for the duration of one message's chunk sequence.
+    /// Serializes all framed writes to this connection's WebRTC DataChannel. Multiple tasks.
     pub dc_write_lock: Arc<Mutex<()>>,
 
-    /// Serializes SDP (re)negotiations on this connection's PeerConnection.
-    /// Remote Desktop start/stop and ICE restart each create an offer + set the
-    /// local description; without this lock two concurrent renegotiations race on
-    /// `set_local_description` (signaling-state glare). Held across a whole
-    /// offer→answer transaction so the next queued renegotiation starts stable.
+    /// Serializes SDP (re)negotiations on this connection's PeerConnection. Remote Desktop.
     pub negotiation_lock: Arc<Mutex<()>>,
 }
 
@@ -168,7 +134,6 @@ impl NodeContext {
         }
     }
 
-    /// Helper for sending logs
     pub fn log(&self, msg: impl Into<String>) {
         let text = msg.into();
         let tx = self.log_tx.clone();
@@ -177,7 +142,6 @@ impl NodeContext {
         });
     }
 
-    /// Helper for sending reply messages
     pub async fn send_msg(&self, msg: P2pMessage) {
         let mac = if let Some(res_id) = msg.resource_id() {
             let session_keys = self.session_keys.lock().await;
@@ -216,7 +180,6 @@ impl NodeContext {
             .await;
     }
 
-    /// Helper for sending binary frames
     pub async fn send_binary(&self, data: Vec<u8>) {
         let _ = self
             .outgoing_tx
@@ -224,19 +187,13 @@ impl NodeContext {
             .await;
     }
 
-    /// Stops every active background stream
     pub async fn shutdown(&self) {
         self.active_terminals.lock().await.clear();
         self.active_socks_streams.lock().await.clear();
         self.session_keys.lock().await.clear();
     }
 
-    /// Main message-routing dispatcher.
     pub async fn process_message(&self, p2p_msg: P2pMessage) {
-        // --- Security Gateway: Capability Access Control ---
-        // Verify that if a message targets a specific resource_id, the identity actually shares it!
-        // ONLY APPLY THIS TO INCOMING REQUESTS! Responses (like SystemInfoResponse) are handled by the Caller
-        // and its the Caller's job to verify them, not ours to block them just because we don't own the resource id!
         let is_response = matches!(
             &p2p_msg,
             P2pMessage::EntriesResponse { .. }
@@ -281,8 +238,6 @@ impl NodeContext {
             }
         }
 
-        // Protocol-level messages this crate answers itself; everything else
-        // goes to the installed handler, if the application registered one.
         match p2p_msg {
             P2pMessage::Handshake {
                 requested_resources,
@@ -295,7 +250,6 @@ impl NodeContext {
                     my_resources.retain(|r| req_types.contains(&r.resource_type));
                 }
 
-                // --- Capability Based Security ---
                 for res in my_resources.iter_mut() {
                     let token = nodeinnet_p2p::crypto::generate_session_token();
                     self.log(format!(
@@ -304,8 +258,7 @@ impl NodeContext {
                         &token[..4]
                     ));
                     res.session_token = Some(token.clone());
-                    // LOCAL-ONLY: never ship the resource's config (local path)
-                    // to the peer — we resolve the base path from our own copy.
+                    // LOCAL-ONLY: never ship the resource's config (local path) to the peer — we resolve.
                     res.config = None;
                     session_keys.insert(res.id.clone(), token);
                 }

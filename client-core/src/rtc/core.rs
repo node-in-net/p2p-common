@@ -33,7 +33,6 @@ pub async fn handle_core_message(
 
             let my_id = node_context.my_info.id.clone();
 
-            // Replay Attack Validation
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
             if now > timestamp_ms && now - timestamp_ms > 60_000 {
                 handler.on_log(format!("❌ Zero-Trust Auth Rejected: Timestamp too old (replay attack prevention) for {}.", target_node_id)).await;
@@ -79,7 +78,6 @@ pub async fn handle_core_message(
             handler.on_p2p_connected(target_node_id.clone()).await;
             crate::rtc::spawn_connection_type_poller(peer_connection.clone(), target_node_id.clone(), handler.clone());
 
-            // Cache discovered IP addresses with the remote TCP port on successful zero-trust authentication
             if let Some(port) = local_tcp_port {
                 let ips = node_context.discovered_ips.lock().await;
                 if !ips.is_empty() {
@@ -91,13 +89,11 @@ pub async fn handle_core_message(
                 }
             }
 
-            // Dynamic negotiation of chunk sizes
             if let Some(c_size) = peer_max_chunk_size_req {
                 node_context.peer_max_chunk_size.store(c_size, std::sync::atomic::Ordering::Relaxed);
                 handler.on_log(format!("⚙️ Peer negotiated max chunk size: {} bytes", c_size)).await;
             }
 
-            // The Callee handles the Handshake and generates HandshakeResponse containing its resources and keys!
             node_context.process_message(P2pMessage::Handshake {
                 node_version,
                 timestamp_ms,
@@ -145,11 +141,8 @@ pub async fn handle_core_message(
         | P2pMessage::FileChunk { .. }
         | P2pMessage::TerminalOutput { .. }
         | P2pMessage::SocksConnectResponse { .. } => {
-            // Already sent to UI thread
         }
         _other => {
-            // Any other messages not handled fall through.
-            // p2p-node processes them successfully, so NO error log is needed!
         }
     }
 }

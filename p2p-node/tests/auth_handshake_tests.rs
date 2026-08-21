@@ -3,7 +3,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn test_valid_auth_handshake() {
-    // 1. Generate keys for two peers
     let (priv_a, pub_a) = generate_ed25519_keypair();
     let (_, _pub_b) = generate_ed25519_keypair();
 
@@ -14,11 +13,9 @@ fn test_valid_auth_handshake() {
         .unwrap()
         .as_millis() as u64;
 
-    // 2. Peer A creates a handshake aimed at Peer B
     let signature =
         sign_p2p_handshake(&priv_a, id_a, id_b, timestamp).expect("Failed to sign handshake");
 
-    // 3. Peer B receives handshakes and verifies using Peer A's public key
     let verification = verify_p2p_handshake(&signature, &pub_a, id_a, id_b, timestamp);
 
     assert!(
@@ -39,10 +36,8 @@ fn test_invalid_auth_handshake_wrong_target() {
         .unwrap()
         .as_millis() as u64;
 
-    // A signs payload for B
     let signature = sign_p2p_handshake(&priv_a, id_a, id_b, timestamp).unwrap();
 
-    // Eve intercepts and tries to verify it as if it was meant for her
     let verification = verify_p2p_handshake(&signature, &pub_a, id_evil, id_a, timestamp);
 
     assert!(
@@ -62,10 +57,8 @@ fn test_invalid_auth_handshake_tampered_timestamp() {
         .unwrap()
         .as_millis() as u64;
 
-    // A signs payload with T = timestamp
     let signature = sign_p2p_handshake(&priv_a, id_a, id_b, timestamp).unwrap();
 
-    // Eve replays the packet with an old timestamp
     let tampered_timestamp = timestamp - 10000;
     let verification = verify_p2p_handshake(&signature, &pub_a, id_b, id_a, tampered_timestamp);
 

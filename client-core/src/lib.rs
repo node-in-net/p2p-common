@@ -36,8 +36,6 @@ pub enum NetCmd {
     AutoConnect(String),
     PeerConnected(String, Vec<nodeinnet_p2p::SharedResource>),
     ReloadResources(Vec<nodeinnet_p2p::SharedResource>),
-    /// Change the announced display name without a reconnect: updates `my_info.name`,
-    /// re-announces the NodeInfo to the signaling server, and re-advertises mDNS.
     UpdateName(String),
     ProcessNodesList(Vec<NodeInfo>),
     MergeNodesList(Vec<NodeInfo>),
@@ -70,7 +68,6 @@ pub trait AppEventHandler: Send + Sync + 'static {
     async fn on_update_nodes(&self, nodes: Vec<NodeInfo>);
     async fn on_download_complete(&self, path: PathBuf);
 
-    // State machine updates
     async fn on_ws_state_changed(&self, _state: WsState) {}
     async fn on_peer_state_changed(&self, _peer_id: String, _state: P2pPeerState) {}
 

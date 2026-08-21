@@ -22,7 +22,6 @@ impl NetworkManager {
 
         self.mode = NetworkMode::LocalMeshFallback;
 
-        // Trigger direct TCP signaling connections on cached IP addresses
         super::trigger_cached_peer_reconnections(
             self.my_info.id.clone(),
             self.private_key.clone(),
@@ -65,7 +64,6 @@ impl NetworkManager {
                         self.current_ws_tx = Some(ws_tx);
                         self.mode = NetworkMode::WebSocketConnected;
 
-                        // mDNS advertiser and scanner continue running in background
 
                         let _handler_read = handler_conn.clone();
                         let net_tx_read = self.net_tx_bg.clone();
@@ -91,7 +89,6 @@ impl NetworkManager {
                                         }
                                     }
                             }
-                            // When disconnected, send Disconnect command to central manager to handle state transition
                             let _ = net_tx_read.send(NetCmd::Disconnect).await;
                         });
 
@@ -321,8 +318,6 @@ impl NetworkManager {
             }
             NetCmd::UpdateName(name) => {
                 self.my_info.name = name;
-                // Reconnect with the new name: the server re-registers us and pushes a
-                // fresh NodesList to peers, so they see the new name without an app restart.
                 if let Some(url) = self.current_ws_url.clone() {
                     let _ = self
                         .net_tx_bg

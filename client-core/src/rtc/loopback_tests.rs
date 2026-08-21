@@ -1,23 +1,4 @@
-//! Real-transport integration tests: two live `WebRtcClient`s connect to each
-//! other in-process over the actual `webrtc-rs` stack (real ICE/DTLS/SCTP/
-//! DataChannel), complete the Zero-Trust handshake, and exchange messages.
-//!
-//! Unlike `src/tests` (which mocks `NodeContext`) these tests exercise the true
-//! transport, so they validate behaviour that a mock cannot — in particular that
-//! the chunk framing/reassembly in [`super::chunking`] survives real SCTP
-//! fragmentation, and that an **ICE restart** renegotiated on the existing
-//! `PeerConnection` preserves the authenticated session and DataChannel.
-//!
-//! Signalling that the production build routes through the WebSocket server is
-//! shuttled here directly between the two clients: SDP via the return values of
-//! `create_offer` / `accept_offer_and_answer` / `apply_answer`, and trickle ICE
-//! candidates via each client's `NetCmd` channel (buffered until the peer's
-//! remote description is set, then added directly).
-//!
-//! These tests need loopback UDP; they are `#[ignore]`d by default so the normal
-//! `cargo test` run stays hermetic. Each test drives two real PeerConnections, so
-//! run them serially (parallel runs saturate loopback ICE and flake):
-//! `cargo test -p client-core -- --ignored --test-threads=1 loopback`.
+//! Real-transport integration tests: two live `WebRtcClient`s connect to each other.
 
 use super::WebRtcClient;
 use crate::{AppEventHandler, NetCmd};
@@ -29,7 +10,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-/// Minimal `AppEventHandler` that records inbound P2P messages for assertions.
 struct TestHandler {
     label: &'static str,
     received: Arc<Mutex<Vec<P2pMessage>>>,
@@ -86,11 +66,6 @@ fn make_node(id: &str, public_key: &str) -> NodeInfo {
 
 type IceBuffer = Arc<Mutex<Vec<(String, Option<String>, Option<u16>)>>>;
 
-/// Drain each `NetCmd` the source client emits; forward its trickle ICE
-/// candidates to `target`. Candidates that arrive before `ready` is set (i.e.
-/// before the target has a remote description) are buffered into `buf`. The
-/// router keeps running for the lifetime of the test so ICE-restart candidates
-/// are forwarded too.
 fn spawn_ice_router(
     mut rx: mpsc::Receiver<NetCmd>,
     target: Arc<WebRtcClient>,
@@ -118,7 +93,6 @@ fn spawn_ice_router(
     });
 }
 
-/// Mark a peer ready to receive candidates and flush any that were buffered.
 async fn flush_ready(ready: &Arc<AtomicBool>, buf: &IceBuffer, target: &Arc<WebRtcClient>) {
     ready.store(true, Ordering::SeqCst);
     let pending: Vec<_> = buf.lock().await.drain(..).collect();
@@ -129,7 +103,6 @@ async fn flush_ready(ready: &Arc<AtomicBool>, buf: &IceBuffer, target: &Arc<WebR
     }
 }
 
-/// Poll until both clients have flipped `is_authenticated`, or time out.
 async fn wait_for_auth(a: &Arc<WebRtcClient>, b: &Arc<WebRtcClient>, timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
@@ -143,7 +116,6 @@ async fn wait_for_auth(a: &Arc<WebRtcClient>, b: &Arc<WebRtcClient>, timeout: Du
     false
 }
 
-/// Poll a handler's inbox for a `TextMessage` whose text matches `expect`.
 async fn wait_for_text(
     inbox: &Arc<Mutex<Vec<P2pMessage>>>,
     expect: &str,
@@ -193,8 +165,7 @@ async fn build_client(
     (Arc::new(client), net_rx, inbox)
 }
 
-/// Bring up two authenticated peers over real loopback WebRTC and return them
-/// with their inboxes. Panics if the handshake does not complete.
+/// Bring up two authenticated peers over real loopback WebRTC and return them with.
 async fn establish_authenticated_pair(
     verbose: bool,
 ) -> (
@@ -209,15 +180,11 @@ async fn establish_authenticated_pair(
     let a_info = make_node(&a_id, &a_pub);
     let b_info = make_node(&b_id, &b_pub);
 
-    // Both peers must trust each other's public key (production does this via the
-    // signalling server's NodesList / PeersSync).
     nodeinnet_p2p::update_known_public_keys(&[a_info.clone(), b_info.clone()]);
 
     let (a, a_net_rx, _a_inbox) = build_client(&a_info, &b_id, &a_priv, verbose, "A").await;
     let (b, b_net_rx, b_inbox) = build_client(&b_info, &a_id, &b_priv, verbose, "B").await;
 
-    // A's emitted candidates flow to B and vice-versa; buffer until the receiver
-    // has set its remote description. Routers stay alive for the whole test.
     let a_ready = Arc::new(AtomicBool::new(false));
     let b_ready = Arc::new(AtomicBool::new(false));
     let a_buf: IceBuffer = Arc::new(Mutex::new(Vec::new()));
@@ -225,7 +192,6 @@ async fn establish_authenticated_pair(
     spawn_ice_router(a_net_rx, b.clone(), b_ready.clone(), b_buf.clone());
     spawn_ice_router(b_net_rx, a.clone(), a_ready.clone(), a_buf.clone());
 
-    // SDP exchange (A is the caller/offerer, B the callee/answerer).
     let offer = a.create_offer().await.expect("create_offer");
     let answer = b.accept_offer_and_answer(offer).await.expect("answer");
     flush_ready(&b_ready, &b_buf, &b).await; // B has a remote description now
@@ -239,24 +205,18 @@ async fn establish_authenticated_pair(
     (a, b, b_inbox)
 }
 
-/// Close both peers' PeerConnections so their ICE agents/tasks stop and free
-/// loopback sockets — otherwise lingering connections from earlier tests saturate
-/// ICE and flake later ones (these tests each drive two real PeerConnections).
+/// Close both peers' PeerConnections so their ICE agents/tasks stop and free loopback.
 async fn close_pair(a: &Arc<WebRtcClient>, b: &Arc<WebRtcClient>) {
     let _ = a.peer_connection.close().await;
     let _ = b.peer_connection.close().await;
 }
 
-/// End-to-end: two nodes complete the real Zero-Trust WebRTC handshake and a
-/// 100 KB (multi-chunk) `TextMessage` round-trips intact — the real-transport
-/// validation of the `chunking` framing/reassembly refactor.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs loopback UDP; run with --ignored"]
 async fn loopback_handshake_and_large_message() {
     let verbose = std::env::var("RTC_TEST_VERBOSE").is_ok();
     let (a, b, b_inbox) = establish_authenticated_pair(verbose).await;
 
-    // 100 KB forces ~10 framed chunks over the real DataChannel/SCTP path.
     let big = "X".repeat(100_000);
     a.send_p2p_message(P2pMessage::TextMessage { text: big.clone() })
         .await
@@ -269,11 +229,6 @@ async fn loopback_handshake_and_large_message() {
     close_pair(&a, &b).await;
 }
 
-/// An ICE restart renegotiated on the existing `PeerConnection` must preserve the
-/// authenticated session and DataChannel (the whole point of fix #2: recover from
-/// a transient path change without a full teardown + re-handshake). We drive the
-/// same in-place renegotiation the production `Disconnected` handler + orchestrator
-/// perform, then verify auth survived and a fresh message still flows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs loopback UDP; run with --ignored"]
 async fn loopback_ice_restart_preserves_session() {
@@ -282,7 +237,6 @@ async fn loopback_ice_restart_preserves_session() {
     let verbose = std::env::var("RTC_TEST_VERBOSE").is_ok();
     let (a, b, b_inbox) = establish_authenticated_pair(verbose).await;
 
-    // Sanity: a message flows before the restart.
     a.send_p2p_message(P2pMessage::TextMessage {
         text: "before-restart".to_string(),
     })
@@ -293,9 +247,6 @@ async fn loopback_ice_restart_preserves_session() {
         "baseline message before ICE restart did not arrive"
     );
 
-    // Perform an ICE restart from the offerer (A) against the EXISTING peer
-    // connection — exactly what the Disconnected handler does, answered in place
-    // by B the way the orchestrator does.
     let opts = RTCOfferOptions {
         ice_restart: true,
         voice_activity_detection: false,
@@ -323,10 +274,8 @@ async fn loopback_ice_restart_preserves_session() {
         .await
         .expect("apply ice-restart answer");
 
-    // Give ICE a moment to reconverge on the fresh credentials.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // The authenticated session must NOT have been torn down by the restart.
     assert!(
         a.node_context.is_authenticated.load(Ordering::Relaxed),
         "A lost authentication across ICE restart"
@@ -336,7 +285,6 @@ async fn loopback_ice_restart_preserves_session() {
         "B lost authentication across ICE restart"
     );
 
-    // And the DataChannel must still carry traffic after the restart.
     a.send_p2p_message(P2pMessage::TextMessage {
         text: "after-restart".to_string(),
     })
@@ -349,11 +297,7 @@ async fn loopback_ice_restart_preserves_session() {
     close_pair(&a, &b).await;
 }
 
-/// Two tasks writing large multi-chunk messages to the SAME DataChannel
-/// concurrently, serialized by the shared per-connection `dc_write_lock`, must
-/// both arrive intact. Without the lock their length-prefixed chunks interleave
-/// and the receiver's sequential reassembler corrupts them (documented by
-/// `chunking::interleaved_writers_corrupt_stream`).
+/// Two tasks writing large multi-chunk messages to the SAME DataChannel concurrently,.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs loopback UDP; run with --ignored"]
 async fn loopback_concurrent_writes_stay_intact() {
@@ -369,7 +313,6 @@ async fn loopback_concurrent_writes_stay_intact() {
     let lock = a.node_context.dc_write_lock.clone();
     let handler: Arc<dyn AppEventHandler> = TestHandler::new("W", verbose).0;
 
-    // Two distinct large (multi-chunk) payloads, encoded exactly like the pipe.
     let text_a = "A".repeat(45_000);
     let text_b = "B".repeat(45_000);
     let encode = |text: &str| {
@@ -384,7 +327,6 @@ async fn loopback_concurrent_writes_stay_intact() {
     let bytes_a = encode(&text_a);
     let bytes_b = encode(&text_b);
 
-    // Fire both writes concurrently against the same channel.
     let t1 = {
         let (dc, lock, handler, data) =
             (dc.clone(), lock.clone(), handler.clone(), bytes_a.clone());
@@ -402,7 +344,6 @@ async fn loopback_concurrent_writes_stay_intact() {
     let _ = t1.await.unwrap();
     let _ = t2.await.unwrap();
 
-    // Both messages must arrive intact despite concurrent writers.
     assert!(
         wait_for_text(&b_inbox, &text_a, Duration::from_secs(15)).await,
         "first concurrent message was lost/corrupted"

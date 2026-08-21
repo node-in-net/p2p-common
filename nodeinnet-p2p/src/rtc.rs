@@ -1,27 +1,16 @@
 use serde::{Deserialize, Serialize};
 
-/// Signaling message types for establishing a WebRTC connection.
-/// Uses `serde(tag = "type", content = "payload")` for convenient parsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum RtcSignal {
-    /// Step 1: the initiator sends an SDP Offer.
     Offer {
         sdp: String,
-        /// When true, this is an in-session **ICE restart** offer — the receiver
-        /// should renegotiate on the *existing* PeerConnection (preserving the
-        /// authenticated session, DataChannel and any media tracks) instead of
-        /// rebuilding from scratch. Optional for backward compatibility: peers
-        /// that predate this field decode it as `false` and fall back to the
-        /// old rebuild path.
         #[serde(default)]
         ice_restart: bool,
     },
 
-    /// Step 2: the receiver replies with an SDP Answer.
     Answer { sdp: String },
 
-    /// Step 3: both sides exchange ICE candidates.
     IceCandidate {
         candidate: String,
         sdp_mid: Option<String>,
@@ -29,25 +18,18 @@ pub enum RtcSignal {
     },
 }
 
-/// Client-to-server message relaying an RTC signal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RtcSignalEnvelope {
-    /// Session (device) ID the signal is addressed to.
     pub to_node_id: String,
-    /// The signaling message itself.
     pub signal: RtcSignal,
 }
 
-/// Server-to-client message carrying an RTC signal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundRtcSignal {
-    /// Session (device) ID the signal came from.
     pub from_node_id: String,
-    /// The signaling message itself.
     pub signal: RtcSignal,
 }
 
-/// Credentials and address list for connecting to a TURN server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCredentials {
     pub username: String,
@@ -55,31 +37,21 @@ pub struct TurnCredentials {
     pub uris: Vec<String>,
 }
 
-/// Relay region picked by the user in the client settings and sent to the
-/// server at login and token refresh. Only the server acts on it — the client
-/// uses the returned URI list verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TurnRegion {
-    /// Every relay we operate.
     #[default]
     Auto,
     Eu,
     Us,
 }
 
-/// Central relay embedded in the backend: UDP only. Always offered, whatever
-/// the region — ICE also pairs relay against relay, so a peer parked on another
-/// regional relay still connects through it.
 const CENTRAL_RELAY: &str = "turn:node.in.net:3478";
 
-/// Regional relays: UDP/TCP, plus TLS on 443 for restrictive firewalls.
 const EU_RELAYS: [&str; 2] = [
     "turn:eu.node.in.net:3478",
     "turns:eu.node.in.net:443?transport=tcp",
 ];
-/// Not deployed yet. While this is empty, picking the US region yields the same
-/// list as Auto (see the fallback below) rather than the central relay alone.
 const US_RELAYS: [&str; 0] = [];
 
 pub fn get_turn_credentials(
@@ -87,7 +59,6 @@ pub fn get_turn_credentials(
     secret: &str,
     region: TurnRegion,
 ) -> Option<TurnCredentials> {
-    // 24 hours validity for the TURN credentials
     let timestamp = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp();
     let turn_username = format!("{}:{}", timestamp, login);
 
@@ -103,8 +74,7 @@ pub fn get_turn_credentials(
 
     let turn_servers_env = std::env::var("TURN_SERVERS").unwrap_or_default();
     let uris = if !turn_servers_env.trim().is_empty() {
-        // An explicit operator override describes the deployment we actually
-        // run, so it is returned untouched — the region filter never applies.
+        // An explicit operator override describes the deployment we actually run, so it is.
         turn_servers_env
             .split(',')
             .map(|s| s.trim().to_string())
@@ -120,8 +90,6 @@ pub fn get_turn_credentials(
 
         let mut uris = vec![CENTRAL_RELAY.to_string()];
         if regional.is_empty() {
-            // The chosen region has no relays deployed; offering the central one
-            // alone would be a downgrade, so fall back to everything we run.
             uris.extend(
                 EU_RELAYS
                     .iter()
@@ -184,8 +152,6 @@ mod tests {
         );
     }
 
-    /// US relays are not deployed, so the region falls back to the full list
-    /// instead of leaving the caller with the central relay alone.
     #[test]
     fn undeployed_region_falls_back_to_every_relay() {
         let creds = get_turn_credentials("alice", "topsecret", TurnRegion::Us).unwrap();
@@ -233,7 +199,6 @@ mod tests {
 
     #[test]
     fn rtc_signal_offer_without_ice_restart_field_defaults_false() {
-        // A payload sent by an older peer (no `ice_restart` key) must decode.
         let json = r#"{"type":"Offer","payload":{"sdp":"v=0\r\n"}}"#;
         let parsed: RtcSignal = serde_json::from_str(json).unwrap();
         assert!(matches!(

@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Message protocol between peers (nodes) over the P2P channel (WebRTC Data Channel).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "cmd", content = "data")]
 pub enum P2pMessage {
-    // --- Basic commands ---
     Ping(u64),
     Pong(u64),
     Goodbye,
@@ -36,7 +34,6 @@ pub enum P2pMessage {
         addresses: std::collections::HashMap<String, Vec<String>>,
     },
 
-    // --- Filesystem navigation ---
     RequestEntries {
         request_id: Uuid,
         resource_id: String, // Resource ID (e.g. a drive)
@@ -69,7 +66,6 @@ pub enum P2pMessage {
         metadata: Option<EntryInfo>, // None when the file/dir was not found
     },
 
-    // --- File and directory management ---
     CreateDirectoryRequest {
         request_id: Uuid,
         resource_id: String,
@@ -119,7 +115,6 @@ pub enum P2pMessage {
         result: Result<(), String>,
     },
 
-    // --- System information ---
     RequestSystemInfo {
         resource_id: String,
     },
@@ -129,7 +124,6 @@ pub enum P2pMessage {
         info: SysInfo,
     },
 
-    // --- Remote terminal ---
     StartTerminal {
         resource_id: String,
     },
@@ -152,11 +146,9 @@ pub enum P2pMessage {
         cols: u16,
     },
 
-    // --- File transfer ---
     FileDownloadRequest {
         resource_id: String,
         file_path: String,
-        /// Unique ID of this particular transfer session
         transfer_id: Uuid,
     },
     FileUploadRequest {
@@ -164,7 +156,6 @@ pub enum P2pMessage {
         target_path: String, // Where to save the file
         file_name: String,
         total_size: u64,
-        /// Unique ID of this particular transfer session
         transfer_id: Uuid,
         permissions: Option<u32>,
     },
@@ -183,7 +174,6 @@ pub enum P2pMessage {
         checksum: Option<String>, // e.g., "sha256:...."
     },
 
-    // --- Windows registry ---
     RequestRegistryKeys {
         request_id: Uuid,
         resource_id: String,
@@ -236,7 +226,6 @@ pub enum P2pMessage {
         result: Result<(), String>,
     },
 
-    // --- Shared Network (SOCKS5 Tunneling) ---
     SocksConnectRequest {
         resource_id: String,
         stream_id: Uuid,
@@ -260,7 +249,6 @@ pub enum P2pMessage {
         stream_id: Uuid,
     },
 
-    // --- Web VPN (HTTP Proxy) ---
     HttpRequest {
         resource_id: String,
         request_id: Uuid,
@@ -286,7 +274,6 @@ pub enum P2pMessage {
         request_id: Uuid,
     },
 
-    // --- Sync Folder ---
     SyncStateRequest {
         resource_id: String,
         target_folder_names: Vec<String>,
@@ -297,7 +284,6 @@ pub enum P2pMessage {
         folder_states: std::collections::BTreeMap<String, Vec<SyncFileInfo>>,
     },
 
-    // --- Remote Desktop ---
     RemoteDesktopRequest {
         resource_id: String,
         start: bool,
@@ -330,7 +316,6 @@ pub enum P2pMessage {
         event: DesktopInputEvent,
     },
 
-    // --- Offline LAN Mesh Variants ---
     RtcSignal {
         target_node_id: String,
         signal_type: String, // "offer", "answer", or "candidate"
@@ -456,7 +441,6 @@ impl P2pMessage {
             | P2pMessage::RemoteDesktopSdpAnswer { .. }
             | P2pMessage::RemoteDesktopInput { .. } => vec![ResourceType::RemoteDesktop],
 
-            // These do not target a resource ID directly
             P2pMessage::Ping(_)
             | P2pMessage::Pong(_)
             | P2pMessage::Goodbye
@@ -523,7 +507,6 @@ impl P2pMessage {
             P2pMessage::RemoteDesktopSdpAnswer { resource_id, .. } => Some(resource_id),
             P2pMessage::RemoteDesktopInput { resource_id, .. } => Some(resource_id),
 
-            // These messages might not have resource_id or handle it differently
             P2pMessage::FileTransferResponse { .. } => None,
             P2pMessage::FileChunk { .. } => None,
             P2pMessage::FileTransferComplete { .. } => None,
@@ -614,21 +597,16 @@ pub struct SharedResource {
     pub id: String,
     pub name: String,
     pub resource_type: ResourceType,
-    /// Per-resource config (e.g. a local filesystem path). Stripped by
-    /// [`SharedResource::without_config`] before it leaves the machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
     #[serde(default = "default_true")]
     pub is_active: bool,
-    /// TEMPORARY SECRET. Issued only to an authorized peer within a P2P session
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_token: Option<String>,
 }
 
 impl SharedResource {
-    /// A copy safe to ANNOUNCE to peers/the server: `config` (which may hold a
-    /// local filesystem path) is dropped. The serving node keeps its own local
-    /// copy and resolves the base path by resource id, so peers never learn it.
+    /// A copy safe to ANNOUNCE to peers/the server: `config` (which may hold a local.
     pub fn without_config(&self) -> SharedResource {
         SharedResource {
             config: None,
@@ -700,12 +678,10 @@ pub enum RegistryValueData {
     Unknown,
 }
 
-/// Helper to serialize any Serde type directly to BSON bytes
 pub fn to_bson_vec<T: serde::Serialize>(val: &T) -> Result<Vec<u8>, String> {
     bson::serialize_to_vec(val).map_err(|e| e.to_string())
 }
 
-/// Helper to deserialize any Serde type directly from BSON bytes
 pub fn from_bson_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     bson::deserialize_from_slice(bytes).map_err(|e| e.to_string())
 }
@@ -724,15 +700,12 @@ impl RegistryValueData {
     }
 }
 
-/// Cryptographic envelope protecting P2P packets from cross-resource routing
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SecuredP2pEnvelope {
     pub mac: Option<String>, // HMAC-SHA256 signature of the message JSON. None for resource-less commands (e.g. Handshake).
     pub message: P2pMessage,
 }
 
-/// Native wrapper carrying data from the p2p node into the client network core (WebRTC).
-/// Separates textual JSON messages from streamed raw binary chunks.
 #[derive(Debug, Clone)]
 pub enum OutboundP2pPayload {
     Message(SecuredP2pEnvelope),
@@ -755,7 +728,6 @@ pub struct RecentResource {
 mod tests {
     use super::*;
 
-    // ── ResourceType predicates ───────────────────────────────────────────────
 
     #[test]
     fn sync_folder_is_only_local() {
@@ -782,7 +754,6 @@ mod tests {
         assert!(ResourceType::RemoteDesktop.is_only_remote());
     }
 
-    // ── RegistryValueData::as_string ─────────────────────────────────────────
 
     #[test]
     fn registry_string_variant_returns_value() {
@@ -827,7 +798,6 @@ mod tests {
         assert!(s.contains("AD"), "expected AD in {}", s);
     }
 
-    // ── SharedResource default field ──────────────────────────────────────────
 
     #[test]
     fn shared_resource_is_active_defaults_to_true() {
@@ -850,7 +820,6 @@ mod tests {
         assert!(!json.contains("session_token"), "json: {}", json);
     }
 
-    // ── P2pMessage serde tag ──────────────────────────────────────────────────
 
     #[test]
     fn ping_serializes_with_cmd_tag() {
@@ -875,7 +844,6 @@ mod tests {
         assert!(matches!(parsed, P2pMessage::Goodbye));
     }
 
-    // ── BSON roundtrip ────────────────────────────────────────────────────────
 
     #[test]
     fn bson_roundtrip_preserves_sys_info() {

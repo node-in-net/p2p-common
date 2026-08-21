@@ -10,7 +10,6 @@ pub fn get_mdns_daemon() -> &'static ServiceDaemon {
     MDNS_DAEMON.get_or_init(|| ServiceDaemon::new().unwrap())
 }
 
-// Start advertising this node on local network via mDNS
 pub fn start_mdns_advertiser(
     node_id: &str,
     public_key: &str,
@@ -49,7 +48,6 @@ pub fn start_mdns_advertiser(
     Ok(())
 }
 
-// Start scanning for other local peers on subnet
 pub fn start_mdns_scanner(
     my_id: String,
     private_key_b64: String,
@@ -79,7 +77,6 @@ pub fn start_mdns_scanner(
                     if let Ok(port) = port_str.parse::<u16>() {
                         let message = format!("{}:{}", peer_id, port);
                         if crypto::verify_message(sig, pub_key, message.as_bytes()).is_ok() {
-                            // Update/register public key
                             let node_info = NodeInfo {
                                 id: peer_id.to_string(),
                                 name: name_prop
@@ -118,7 +115,6 @@ pub fn start_mdns_scanner(
                                     .await;
                             }
 
-                            // Cache all resolved IP addresses
                             let ips = info.get_addresses();
                             for ip in ips {
                                 let addr = format!("{}:{}", ip, port);
@@ -133,7 +129,6 @@ pub fn start_mdns_scanner(
                                     },
                                 );
 
-                                // Check if we are already connected to this peer, if not, attempt connection
                                 let connected = {
                                     let tunnels = local_mesh::get_active_tunnels().lock().await;
                                     tunnels.contains_key(peer_id)

@@ -106,7 +106,6 @@ pub fn verify_p2p_handshake(
         .map_err(|e| e.to_string())
 }
 
-/// Generates a random 32-byte token (session secret) as hex
 pub fn generate_session_token() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -137,7 +136,6 @@ pub fn verify_hmac_sha256(payload: &[u8], key_hex: &str, expected_mac: &str) -> 
     }
 }
 
-/// Computes a plain SHA-256 hash of the text
 pub fn compute_sha256(text: &str) -> String {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
@@ -194,7 +192,6 @@ pub fn verify_message(
 mod tests {
     use super::*;
 
-    // ── argon2 ────────────────────────────────────────────────────────────────
 
     #[test]
     fn argon2_hash_and_verify_roundtrip() {
@@ -212,7 +209,6 @@ mod tests {
     fn argon2_same_password_different_hashes() {
         let h1 = argon2_hash_password("pass").unwrap();
         let h2 = argon2_hash_password("pass").unwrap();
-        // Salt is random each time
         assert_ne!(h1, h2);
     }
 
@@ -228,11 +224,9 @@ mod tests {
     fn argon2_generate_salt_is_valid_base64() {
         let salt = argon2_generate_salt();
         assert!(!salt.is_empty());
-        // Must be decodable as base64
         assert!(general_purpose::STANDARD_NO_PAD.decode(&salt).is_ok());
     }
 
-    // ── ed25519 keypair ───────────────────────────────────────────────────────
 
     #[test]
     fn generate_keypair_produces_nonempty_keys() {
@@ -258,7 +252,6 @@ mod tests {
         assert_ne!(pub1, pub2);
     }
 
-    // ── p2p handshake ─────────────────────────────────────────────────────────
 
     #[test]
     fn sign_and_verify_handshake_roundtrip() {
@@ -294,7 +287,6 @@ mod tests {
         assert!(sign_p2p_handshake("not_valid_base64!!!", "a", "b", 0).is_err());
     }
 
-    // ── session token ─────────────────────────────────────────────────────────
 
     #[test]
     fn session_token_is_64_hex_chars() {
@@ -345,7 +337,6 @@ mod tests {
         assert!(!verify_hmac_sha256(b"payload", &key2, &mac));
     }
 
-    // ── SHA-256 ───────────────────────────────────────────────────────────────
 
     #[test]
     fn sha256_known_value() {
@@ -370,7 +361,6 @@ mod tests {
         assert_ne!(compute_sha256("a"), compute_sha256("b"));
     }
 
-    // ── sign / verify message ─────────────────────────────────────────────────
 
     #[test]
     fn sign_and_verify_message_roundtrip() {
