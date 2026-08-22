@@ -112,7 +112,6 @@ pub fn generate_session_token() -> String {
     hex::encode(bytes)
 }
 
-/// Computes the HMAC-SHA256 signature for the given bytes and key
 pub fn compute_hmac_sha256(payload: &[u8], key_hex: &str) -> String {
     let key_bytes = hex::decode(key_hex).unwrap_or_default();
     let mut mac =
@@ -121,7 +120,6 @@ pub fn compute_hmac_sha256(payload: &[u8], key_hex: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Verifies the HMAC-SHA256 signature for the given bytes
 pub fn verify_hmac_sha256(payload: &[u8], key_hex: &str, expected_mac: &str) -> bool {
     let _computed = compute_hmac_sha256(payload, key_hex);
     // Constant-time comparison (at least partially; otherwise we rely on the hmac crate)
@@ -192,7 +190,6 @@ pub fn verify_message(
 mod tests {
     use super::*;
 
-
     #[test]
     fn argon2_hash_and_verify_roundtrip() {
         let hash = argon2_hash_password("secret123").unwrap();
@@ -227,7 +224,6 @@ mod tests {
         assert!(general_purpose::STANDARD_NO_PAD.decode(&salt).is_ok());
     }
 
-
     #[test]
     fn generate_keypair_produces_nonempty_keys() {
         let (priv_key, pub_key) = generate_ed25519_keypair();
@@ -251,7 +247,6 @@ mod tests {
         assert_ne!(priv1, priv2);
         assert_ne!(pub1, pub2);
     }
-
 
     #[test]
     fn sign_and_verify_handshake_roundtrip() {
@@ -287,7 +282,6 @@ mod tests {
         assert!(sign_p2p_handshake("not_valid_base64!!!", "a", "b", 0).is_err());
     }
 
-
     #[test]
     fn session_token_is_64_hex_chars() {
         let token = generate_session_token();
@@ -301,8 +295,6 @@ mod tests {
         let t2 = generate_session_token();
         assert_ne!(t1, t2);
     }
-
-    // ── HMAC-SHA256 ───────────────────────────────────────────────────────────
 
     #[test]
     fn hmac_known_value() {
@@ -337,7 +329,6 @@ mod tests {
         assert!(!verify_hmac_sha256(b"payload", &key2, &mac));
     }
 
-
     #[test]
     fn sha256_known_value() {
         let result = compute_sha256("hello");
@@ -360,7 +351,6 @@ mod tests {
     fn sha256_different_inputs_different_hashes() {
         assert_ne!(compute_sha256("a"), compute_sha256("b"));
     }
-
 
     #[test]
     fn sign_and_verify_message_roundtrip() {

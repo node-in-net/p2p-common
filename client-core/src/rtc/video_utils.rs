@@ -65,7 +65,7 @@ pub fn bgra_to_yuv420p(
     out
 }
 
-/// Convert a decoded YUV420p frame into BGRA (`out_bgra` must be `width*height*4`.
+/// `out_bgra` must be `width * height * 4` bytes.
 #[cfg(feature = "simd-yuv")]
 #[allow(clippy::too_many_arguments)]
 pub fn yuv420p_to_bgra(

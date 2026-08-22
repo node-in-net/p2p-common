@@ -1,4 +1,4 @@
-//! Application-layer chunk framing & reassembly for P2P DataChannel messages.  WebRTC.
+//! Application-layer chunk framing & reassembly for P2P DataChannel messages.
 
 pub const DEFAULT_MAX_CHUNK_PAYLOAD: usize = 10240;
 
@@ -23,7 +23,6 @@ pub fn frame_chunks(data: &[u8], max_chunk_payload: usize) -> Vec<Vec<u8>> {
     out
 }
 
-/// Returns `true` if `frame` is the zero-length terminator chunk produced by.
 pub fn is_terminator(frame: &[u8]) -> bool {
     frame.len() == 2 && frame[0] == 0 && frame[1] == 0
 }
@@ -37,7 +36,6 @@ pub enum ChunkOutcome {
     LengthMismatch { declared: usize, available: usize },
 }
 
-/// Stateful reassembler for one DataChannel's inbound framed chunks.  Feed each.
 #[derive(Default)]
 pub struct ChunkAssembler {
     buf: Vec<u8>,
@@ -168,7 +166,6 @@ mod tests {
         assert_eq!(asm.buffered_len(), 0, "buffer must be dropped on mismatch");
     }
 
-    /// Regression / characterization test for the concurrent-writer hazard.  The assembler.
     #[test]
     fn interleaved_writers_corrupt_stream() {
         let max = 10240;
@@ -180,7 +177,6 @@ mod tests {
         assert!(frames_a.len() >= 3, "A should be several chunks");
         assert_eq!(frames_b.len(), 1, "B is one short chunk");
 
-        // Interleave: A's first full chunk, then all of B, then the rest of A — exactly the.
         let mut wire: Vec<Vec<u8>> = Vec::new();
         wire.push(frames_a[0].clone());
         wire.extend(frames_b.iter().cloned());
@@ -194,7 +190,6 @@ mod tests {
             }
         }
 
-        // The clean, correct originals must NOT both survive interleaving.
         assert!(
             !completed.contains(&msg_a) || !completed.contains(&msg_b),
             "interleaving unexpectedly preserved both messages; \

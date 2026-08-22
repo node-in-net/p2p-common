@@ -36,8 +36,8 @@ pub enum P2pMessage {
 
     RequestEntries {
         request_id: Uuid,
-        resource_id: String, // Resource ID (e.g. a drive)
-        path: String,        // Path inside the resource
+        resource_id: String,
+        path: String, // Path inside the resource
     },
     EntriesResponse {
         request_id: Uuid,
@@ -82,7 +82,7 @@ pub enum P2pMessage {
     DeleteEntryRequest {
         request_id: Uuid,
         resource_id: String,
-        path: String, // Full path of the file/directory
+        path: String,
     },
     DeleteEntryResponse {
         request_id: Uuid,
@@ -93,8 +93,8 @@ pub enum P2pMessage {
     RenameEntryRequest {
         request_id: Uuid,
         resource_id: String,
-        path: String,     // Current full path
-        new_path: String, // New full path
+        path: String,
+        new_path: String,
     },
     RenameEntryResponse {
         request_id: Uuid,
@@ -153,7 +153,7 @@ pub enum P2pMessage {
     },
     FileUploadRequest {
         resource_id: String,
-        target_path: String, // Where to save the file
+        target_path: String,
         file_name: String,
         total_size: u64,
         transfer_id: Uuid,
@@ -215,14 +215,14 @@ pub enum P2pMessage {
     SetRegistryValueRequest {
         request_id: Uuid,
         resource_id: String,
-        path: String, // Registry key path
+        path: String,
         value_name: String,
         value_data: RegistryValueData,
     },
     SetRegistryValueResponse {
         request_id: Uuid,
         resource_id: String,
-        path: String, // Registry key path
+        path: String,
         result: Result<(), String>,
     },
 
@@ -242,7 +242,7 @@ pub enum P2pMessage {
         resource_id: String,
         stream_id: Uuid,
         #[serde(with = "serde_bytes")]
-        data: Vec<u8>, // Raw traffic bytes
+        data: Vec<u8>,
     },
     SocksClose {
         resource_id: String,
@@ -255,7 +255,7 @@ pub enum P2pMessage {
         method: String,
         url: String,
         headers: std::collections::BTreeMap<String, String>,
-        body: Option<Vec<u8>>, // HttpRequest body can be left alone or mapped. If it's an array, it's fine.
+        body: Option<Vec<u8>>,
     },
     HttpResponseStart {
         resource_id: String,
@@ -606,7 +606,7 @@ pub struct SharedResource {
 }
 
 impl SharedResource {
-    /// A copy safe to ANNOUNCE to peers/the server: `config` (which may hold a local.
+    /// A copy safe to announce: `config` (which may hold a local path) is stripped.
     pub fn without_config(&self) -> SharedResource {
         SharedResource {
             config: None,
@@ -728,7 +728,6 @@ pub struct RecentResource {
 mod tests {
     use super::*;
 
-
     #[test]
     fn sync_folder_is_only_local() {
         assert!(ResourceType::SyncFolder.is_only_local());
@@ -753,7 +752,6 @@ mod tests {
     fn remote_desktop_is_only_remote() {
         assert!(ResourceType::RemoteDesktop.is_only_remote());
     }
-
 
     #[test]
     fn registry_string_variant_returns_value() {
@@ -798,7 +796,6 @@ mod tests {
         assert!(s.contains("AD"), "expected AD in {}", s);
     }
 
-
     #[test]
     fn shared_resource_is_active_defaults_to_true() {
         let json = r#"{"id":"r1","name":"Root","resource_type":"Filesystem"}"#;
@@ -819,7 +816,6 @@ mod tests {
         let json = serde_json::to_string(&res).unwrap();
         assert!(!json.contains("session_token"), "json: {}", json);
     }
-
 
     #[test]
     fn ping_serializes_with_cmd_tag() {
@@ -843,7 +839,6 @@ mod tests {
         let parsed: P2pMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, P2pMessage::Goodbye));
     }
-
 
     #[test]
     fn bson_roundtrip_preserves_sys_info() {
