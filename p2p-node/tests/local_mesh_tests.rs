@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn test_local_mesh_handshake_and_signaling() {
-    let config = client_config::AppConfig::new("p2p-node-mesh-test");
+    let peer_store = std::sync::Arc::new(nodeinnet_p2p::MemoryPeerStore::default());
 
     let (priv_a, pub_a) = generate_ed25519_keypair();
     let (priv_b, pub_b) = generate_ed25519_keypair();
@@ -46,7 +46,7 @@ async fn test_local_mesh_handshake_and_signaling() {
     let _ = local_mesh::SIGNAL_TX.set(signal_tx);
 
     let port_b =
-        local_mesh::start_tcp_signaling_server(id_b.to_string(), priv_b.clone(), config.clone())
+        local_mesh::start_tcp_signaling_server(id_b.to_string(), priv_b.clone(), peer_store.clone())
             .await
             .expect("Failed to start responder TCP signaling server");
 
@@ -56,7 +56,7 @@ async fn test_local_mesh_handshake_and_signaling() {
         id_b.to_string(),
         id_a.to_string(),
         priv_a.clone(),
-        config.clone(),
+        peer_store.clone(),
     )
     .await
     .expect("Failed to perform Noise handshake and register tunnel");

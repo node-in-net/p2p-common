@@ -82,7 +82,7 @@ pub async fn handle_core_message(
                 let ips = node_context.discovered_ips.lock().await;
                 if !ips.is_empty() {
                     handler.on_log(format!("💾 [CACHE] Caching last known peer IPs for {}: {:?} on port {}", target_node_id, *ips, port)).await;
-                    node_context.config.update("peers", |map: &mut std::collections::HashMap<String, nodeinnet_p2p::PeerConfig>| {
+                    node_context.peer_store.update(&mut |map: &mut std::collections::HashMap<String, nodeinnet_p2p::PeerConfig>| {
                         let entry = map.entry(target_node_id.clone()).or_default();
                         entry.last_known_addresses = ips.iter().map(|ip| format!("{}:{}", ip, port)).collect();
                     });

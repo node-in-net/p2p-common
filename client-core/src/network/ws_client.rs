@@ -25,7 +25,7 @@ impl NetworkManager {
         super::trigger_cached_peer_reconnections(
             self.my_info.id.clone(),
             self.private_key.clone(),
-            self.config.clone(),
+            self.peer_store.clone(),
         );
     }
 
@@ -139,9 +139,7 @@ impl NetworkManager {
                     .await;
                 nodeinnet_p2p::update_known_public_keys(&nodes);
 
-                self.config.update(
-                    "peers",
-                    |map: &mut std::collections::HashMap<String, nodeinnet_p2p::PeerConfig>| {
+                self.peer_store.update(&mut |map: &mut std::collections::HashMap<String, nodeinnet_p2p::PeerConfig>| {
                         let server_ids: std::collections::HashSet<String> = nodes
                             .iter()
                             .filter(|n| !n.is_temporary)

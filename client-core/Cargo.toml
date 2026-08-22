@@ -10,7 +10,6 @@ publish = false
 [dependencies]
 nodeinnet-p2p = { workspace = true }
 p2p-node = { workspace = true, default-features = false }
-client-config = { workspace = true }
 
 tokio = { workspace = true, features = ["full"] }
 tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }

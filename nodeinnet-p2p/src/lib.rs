@@ -2,17 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-pub mod account;
-pub mod crypto;
 pub mod p2p;
-pub mod rtc;
-pub mod ws;
 
-pub use account::*;
-pub use crypto::*;
 pub use p2p::*;
-pub use rtc::*;
-pub use ws::*;
+
+// Re-exported so every peer-side consumer keeps reaching these through this crate;
+// the website links `nodeinnet-api` directly and never sees the protocol above.
+pub use nodeinnet_api::*;
 
 /// Base URL of the node.in.net service, as compiled in.  Prefer [`api_base()`] over.
 #[cfg(debug_assertions)]
@@ -76,34 +72,6 @@ fn non_empty(s: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct NodeInfo {
-    pub id: String,
-    pub name: String,
-    pub os: String,
-    pub version: String,
-    pub app_type: String,
-    pub build_type: String,
-    pub public_key: String,
-    pub resources: Vec<SharedResource>,
-    #[serde(default = "default_is_online")]
-    pub is_online: bool,
-    #[serde(default)]
-    pub last_used: i64,
-    #[serde(default)]
-    pub is_temporary: bool,
-}
-
-impl NodeInfo {
-    /// A copy safe to ANNOUNCE to peers/the server: every resource's `config` (which may.
-    pub fn announced(&self) -> NodeInfo {
-        NodeInfo {
-            resources: self.resources.iter().map(|r| r.without_config()).collect(),
-            ..self.clone()
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PeerConfig {
     pub name: String,
@@ -115,21 +83,31 @@ pub struct PeerConfig {
     pub last_known_addresses: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ResourceWrapper {
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub os: Option<String>,
-    #[serde(default)]
-    pub app_type: Option<String>,
-    #[serde(default)]
-    pub version: Option<String>,
-    pub resources: Vec<SharedResource>,
+/// Where the peer table is kept. This crate and its dependants never decide that:
+/// the host reads its own configuration and hands an implementation in.
+pub trait PeerStore: Send + Sync {
+    fn load(&self) -> std::collections::HashMap<String, PeerConfig>;
+    /// Read-modify-write under whatever lock the host uses, then persist.
+    fn update(&self, f: &mut dyn FnMut(&mut std::collections::HashMap<String, PeerConfig>));
 }
 
-fn default_is_online() -> bool {
-    true
+/// For hosts that keep no peer table — tests, and any embedder that re-discovers
+/// its peers every run.
+#[derive(Default)]
+pub struct MemoryPeerStore {
+    peers: std::sync::Mutex<std::collections::HashMap<String, PeerConfig>>,
+}
+
+impl PeerStore for MemoryPeerStore {
+    fn load(&self) -> std::collections::HashMap<String, PeerConfig> {
+        self.peers.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    fn update(&self, f: &mut dyn FnMut(&mut std::collections::HashMap<String, PeerConfig>)) {
+        if let Ok(mut peers) = self.peers.lock() {
+            f(&mut peers);
+        }
+    }
 }
 
 use std::collections::HashMap;

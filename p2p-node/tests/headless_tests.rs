@@ -89,9 +89,9 @@ fn build_mock_context() -> (NodeContext, Uuid, Uuid, Uuid) {
     let (out_tx, _) = mpsc::channel(100);
     let (log_tx, _) = mpsc::channel(100);
     let (event_tx, _) = mpsc::channel(100);
-    let config = client_config::AppConfig::new("p2p-node-headless-test");
+    let peer_store = std::sync::Arc::new(nodeinnet_p2p::MemoryPeerStore::default());
 
-    let ctx = NodeContext::new(out_tx, log_tx, event_tx, info, config);
+    let ctx = NodeContext::new(out_tx, log_tx, event_tx, info, peer_store);
     ctx.is_authenticated.store(true, Ordering::Relaxed);
 
     (ctx, sys_id, fs_id, term_id)

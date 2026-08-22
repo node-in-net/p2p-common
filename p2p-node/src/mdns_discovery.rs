@@ -51,7 +51,7 @@ pub fn start_mdns_advertiser(
 pub fn start_mdns_scanner(
     my_id: String,
     private_key_b64: String,
-    config: client_config::AppConfig,
+    peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 ) -> Result<(), String> {
     let mdns = get_mdns_daemon();
     let service_type = "_nodeinnet._tcp.local.";
@@ -97,9 +97,7 @@ pub fn start_mdns_scanner(
                             nodeinnet_p2p::update_known_public_keys(std::slice::from_ref(
                                 &node_info,
                             ));
-                            config.update(
-                                "peers",
-                                |map: &mut HashMap<String, nodeinnet_p2p::PeerConfig>| {
+                            peer_store.update(&mut |map: &mut HashMap<String, nodeinnet_p2p::PeerConfig>| {
                                     let entry = map.entry(peer_id.to_string()).or_default();
                                     entry.public_key = pub_key.to_string();
                                     entry.name = node_info.name.clone();
@@ -119,9 +117,7 @@ pub fn start_mdns_scanner(
                             for ip in ips {
                                 let addr = format!("{}:{}", ip, port);
 
-                                config.update(
-                                    "peers",
-                                    |map: &mut HashMap<String, nodeinnet_p2p::PeerConfig>| {
+                                peer_store.update(&mut |map: &mut HashMap<String, nodeinnet_p2p::PeerConfig>| {
                                         let entry = map.entry(peer_id.to_string()).or_default();
                                         if !entry.last_known_addresses.contains(&addr) {
                                             entry.last_known_addresses.push(addr.clone());
@@ -139,7 +135,7 @@ pub fn start_mdns_scanner(
                                     let addr_clone = addr.clone();
                                     let my_id_clone = my_id.clone();
                                     let private_key_b64_clone = private_key_b64.clone();
-                                    let config_clone = config.clone();
+                                    let peer_store_clone = peer_store.clone();
 
                                     tokio::spawn(async move {
                                         let _ = local_mesh::connect_to_peer_signaling(
@@ -147,13 +143,13 @@ pub fn start_mdns_scanner(
                                             peer_id_clone,
                                             my_id_clone,
                                             private_key_b64_clone,
-                                            config_clone,
+                                            peer_store_clone,
                                         )
                                         .await;
                                     });
                                 }
                             }
-                            config.save();
+                            
                         }
                     }
                 }

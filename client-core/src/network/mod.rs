@@ -128,11 +128,11 @@ pub async fn route_rtc_signal(
 pub fn trigger_cached_peer_reconnections(
     my_id: String,
     private_key_b64: String,
-    config: client_config::AppConfig,
+    peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 ) {
     tokio::spawn(async move {
         let cached_map: std::collections::HashMap<String, nodeinnet_p2p::PeerConfig> =
-            config.get_or_default("peers");
+            peer_store.load();
         for (peer_id, peer) in cached_map {
             let addrs = peer.last_known_addresses;
             if peer_id == my_id {
@@ -153,14 +153,14 @@ pub fn trigger_cached_peer_reconnections(
                     let peer_id_clone = peer_id.clone();
                     let my_id_clone = my_id.clone();
                     let private_key_b64_clone = private_key_b64.clone();
-                    let config_clone = config.clone();
+                    let peer_store_clone = peer_store.clone();
                     tokio::spawn(async move {
                         let _ = p2p_node::local_mesh::connect_to_peer_signaling(
                             addr_clone,
                             peer_id_clone,
                             my_id_clone,
                             private_key_b64_clone,
-                            config_clone,
+                            peer_store_clone,
                         )
                         .await;
                     });
@@ -176,7 +176,8 @@ pub fn start_network_thread(
     handler: Arc<dyn AppEventHandler>,
     my_info: NodeInfo,
     private_key: String,
-    config: client_config::AppConfig,
+    peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
+    enable_local_discovery: bool,
 ) {
     thread::spawn(move || {
         let rt = Runtime::new().unwrap();
@@ -186,7 +187,8 @@ pub fn start_network_thread(
             handler,
             my_info,
             private_key,
-            config,
+            peer_store,
+            enable_local_discovery,
         ));
     });
 }
@@ -197,20 +199,21 @@ pub async fn run_network_manager(
     handler: Arc<dyn AppEventHandler>,
     my_info: NodeInfo,
     private_key: String,
-    config: client_config::AppConfig,
+    peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
+    enable_local_discovery: bool,
 ) {
     let mut manager = NetworkManager::new(
         my_info,
         private_key.clone(),
         handler.clone(),
         net_tx.clone(),
-        config.clone(),
+        peer_store.clone(),
     );
 
     let peers: std::collections::HashMap<String, nodeinnet_p2p::PeerConfig> =
-        config.get_or_default("peers");
+        peer_store.load();
     let mut cached_peers_log = format!(
-        "📁 [Config] Loaded {} cached peers from config.json on startup:\n",
+        "📁 Loaded {} cached peers from the host store on startup:\n",
         peers.len()
     );
     for (id, peer) in &peers {
@@ -250,9 +253,6 @@ pub async fn run_network_manager(
         let _ = manager.handler.on_update_nodes(all_nodes).await;
     }
 
-    let enable_local_discovery = config
-        .get::<bool>("app.enable_local_discovery")
-        .unwrap_or(false);
     if enable_local_discovery {
         manager.start_local_discovery();
     }
@@ -302,7 +302,8 @@ pub fn spawn_network_task(
     handler: Arc<dyn AppEventHandler>,
     my_info: NodeInfo,
     private_key: String,
-    config: client_config::AppConfig,
+    peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
+    enable_local_discovery: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(run_network_manager(
         net_rx,
@@ -310,6 +311,7 @@ pub fn spawn_network_task(
         handler,
         my_info,
         private_key,
-        config,
+        peer_store,
+        enable_local_discovery,
     ))
 }

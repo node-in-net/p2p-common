@@ -120,13 +120,3 @@ pub async fn register_device(
         .map_err(|e| format!("Failed to parse device response: {}", e))
 }
 
-const TURN_REGION_KEY: &str = "turn_region";
-
-pub fn turn_region(config: &client_config::AppConfig) -> nodeinnet_p2p::TurnRegion {
-    config.get_or_default(TURN_REGION_KEY)
-}
-
-pub fn set_turn_region(config: &client_config::AppConfig, region: nodeinnet_p2p::TurnRegion) {
-    config.set(TURN_REGION_KEY, region);
-    config.save();
-}

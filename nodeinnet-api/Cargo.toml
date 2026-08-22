@@ -1,22 +1,17 @@
 [package]
-name = "nodeinnet-p2p"
+name = "nodeinnet-api"
 version = "0.1.0"
 edition = "2021"
-description = "node.in.net peer-to-peer protocol: command messages, node/resource model, WebRTC signalling, BSON wire format"
+description = "The contract every node.in.net client shares with the website: account REST payloads, the node/resource model, WebRTC signalling and password hashing. Carries no peer-to-peer protocol."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/node-in-net/p2p-common"
 publish = false
 
 [dependencies]
-nodeinnet-api = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-uuid = { version = "1.4", features = ["serde", "v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.21"
-bson = { version = "3.1.0", features = ["serde", "uuid-1", "chrono-0_4"] }
-# raw byte payloads in P2pMessage (`#[serde(with = "serde_bytes")]`)
-serde_bytes = "0.11.19"
 # TURN credential derivation in rtc::TurnCredentials (HMAC-SHA1, per RFC 5766)
 hmac = "0.12.1"
 sha1 = "0.10"

@@ -21,7 +21,7 @@ pub struct NetworkManager {
     pub net_tx_bg: tokio_mpsc::Sender<NetCmd>,
     pub local_discovery_enabled: bool,
     pub local_discovery_started: bool,
-    pub config: client_config::AppConfig,
+    pub peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 }
 
 impl NetworkManager {
@@ -30,7 +30,7 @@ impl NetworkManager {
         private_key: String,
         handler: Arc<dyn AppEventHandler>,
         net_tx_bg: tokio_mpsc::Sender<NetCmd>,
-        config: client_config::AppConfig,
+        peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
     ) -> Self {
         Self {
             mode: NetworkMode::WebSocketConnecting,
@@ -48,7 +48,7 @@ impl NetworkManager {
             net_tx_bg,
             local_discovery_enabled: false,
             local_discovery_started: false,
-            config,
+            peer_store,
         }
     }
 
@@ -100,13 +100,13 @@ impl NetworkManager {
         let my_name_local = self.my_info.name.clone();
         let my_os_local = self.my_info.os.clone();
         let handler_local = self.handler.clone();
-        let config_local = self.config.clone();
+        let peer_store_local = self.peer_store.clone();
 
         tokio::spawn(async move {
             match p2p_node::local_mesh::start_tcp_signaling_server(
                 my_id_local.clone(),
                 priv_key_local.clone(),
-                config_local.clone(),
+                peer_store_local.clone(),
             )
             .await
             {
@@ -132,7 +132,7 @@ impl NetworkManager {
             let _ = p2p_node::mdns_discovery::start_mdns_scanner(
                 my_id_local,
                 priv_key_local,
-                config_local,
+                peer_store_local,
             );
         });
     }

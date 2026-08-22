@@ -399,9 +399,7 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                 .await;
 
             nodeinnet_p2p::update_known_public_keys(nodes);
-            node_context.config.update(
-                "peers",
-                |map: &mut std::collections::HashMap<String, nodeinnet_p2p::PeerConfig>| {
+            node_context.peer_store.update(&mut |map: &mut std::collections::HashMap<String, nodeinnet_p2p::PeerConfig>| {
                     for node in nodes {
                         let entry = map.entry(node.id.clone()).or_default();
                         entry.public_key = node.public_key.clone();
@@ -414,7 +412,7 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                     }
                 },
             );
-            node_context.config.save();
+            
 
             let _ = net_tx
                 .send(crate::NetCmd::MergeNodesList(nodes.clone()))
@@ -1094,7 +1092,7 @@ impl WebRtcClient {
         target_node_id: String,
         private_key: String,
         turn_credentials: Option<nodeinnet_p2p::rtc::TurnCredentials>,
-        config: client_config::AppConfig,
+        peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
     ) -> Result<Self, webrtc::Error> {
         let connection_id = uuid::Uuid::new_v4();
         let pending_messages = Arc::new(Mutex::new(Vec::new()));
@@ -1111,7 +1109,7 @@ impl WebRtcClient {
             }
         });
 
-        let node_context = NodeContext::new(out_tx, log_tx, local_evt_tx, my_info.clone(), config);
+        let node_context = NodeContext::new(out_tx, log_tx, local_evt_tx, my_info.clone(), peer_store);
 
         let handler_logs = handler.clone();
         tokio::spawn(async move {

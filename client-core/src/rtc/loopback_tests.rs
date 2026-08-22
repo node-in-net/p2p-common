@@ -150,7 +150,7 @@ async fn build_client(
 ) {
     let (handler, inbox) = TestHandler::new(label, verbose);
     let (net_tx, net_rx) = mpsc::channel(256);
-    let cfg = client_config::AppConfig::new(&format!("client-core-itest-{}", my.id));
+    let cfg = std::sync::Arc::new(nodeinnet_p2p::MemoryPeerStore::default());
     let client = WebRtcClient::new(
         handler,
         net_tx,

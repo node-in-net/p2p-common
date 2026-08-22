@@ -94,7 +94,7 @@ pub struct NodeContext {
 
     pub peer_max_chunk_size: Arc<std::sync::atomic::AtomicUsize>,
     pub discovered_ips: Arc<Mutex<Vec<String>>>,
-    pub config: client_config::AppConfig,
+    pub peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 
     /// Serializes all framed writes to this connection's WebRTC DataChannel. Multiple tasks.
     pub dc_write_lock: Arc<Mutex<()>>,
@@ -109,7 +109,7 @@ impl NodeContext {
         log_tx: mpsc::Sender<String>,
         local_event_tx: mpsc::Sender<LocalP2pEvent>,
         my_info: NodeInfo,
-        config: client_config::AppConfig,
+        peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
     ) -> Self {
         Self {
             outgoing_tx,
@@ -128,7 +128,7 @@ impl NodeContext {
             rx_binary_buffers: Arc::new(Mutex::new(HashMap::new())),
             peer_max_chunk_size: Arc::new(std::sync::atomic::AtomicUsize::new(10240)),
             discovered_ips: Arc::new(Mutex::new(Vec::new())),
-            config,
+            peer_store,
             dc_write_lock: Arc::new(Mutex::new(())),
             negotiation_lock: Arc::new(Mutex::new(())),
         }
@@ -334,12 +334,20 @@ mod tests {
         }
     }
 
+    struct NoPeerStore;
+    impl nodeinnet_p2p::PeerStore for NoPeerStore {
+        fn load(&self) -> HashMap<String, nodeinnet_p2p::PeerConfig> {
+            HashMap::new()
+        }
+        fn update(&self, _: &mut dyn FnMut(&mut HashMap<String, nodeinnet_p2p::PeerConfig>)) {}
+    }
+
     fn make_test_context() -> NodeContext {
         let (outgoing_tx, _) = mpsc::channel(1);
         let (log_tx, _) = mpsc::channel(1);
         let (event_tx, _) = mpsc::channel(1);
-        let config = client_config::AppConfig::new("p2p-node-unit-test");
-        NodeContext::new(outgoing_tx, log_tx, event_tx, make_test_node_info(), config)
+        let peers = std::sync::Arc::new(NoPeerStore);
+        NodeContext::new(outgoing_tx, log_tx, event_tx, make_test_node_info(), peers)
     }
 
     #[test]

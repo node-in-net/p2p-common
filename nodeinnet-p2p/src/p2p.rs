@@ -1,3 +1,4 @@
+pub use nodeinnet_api::{ResourceType, SharedResource};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -586,58 +587,6 @@ pub struct EntryInfo {
 pub enum FileTransferStatus {
     Accepted { total_size: u64 },
     Rejected { reason: String },
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SharedResource {
-    pub id: String,
-    pub name: String,
-    pub resource_type: ResourceType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<String>,
-    #[serde(default = "default_true")]
-    pub is_active: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_token: Option<String>,
-}
-
-impl SharedResource {
-    /// A copy safe to ANNOUNCE to peers/the server: `config` (which may hold a local.
-    pub fn without_config(&self) -> SharedResource {
-        SharedResource {
-            config: None,
-            ..self.clone()
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ResourceType {
-    Filesystem,
-    SystemInfo,
-    Terminal,
-    Registry,
-    SharedNetwork,
-
-    SyncFolder,
-    RemoteDesktop,
-}
-
-impl ResourceType {
-    pub fn is_only_local(&self) -> bool {
-        matches!(self, ResourceType::SyncFolder)
-    }
-
-    pub fn is_only_remote(&self) -> bool {
-        matches!(
-            self,
-            ResourceType::Terminal | ResourceType::SharedNetwork | ResourceType::RemoteDesktop
-        )
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

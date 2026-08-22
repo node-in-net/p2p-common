@@ -231,7 +231,7 @@ impl NetworkManager {
                         self.last_known_nodes.values().cloned().collect();
                     let sync_addresses: std::collections::HashMap<String, Vec<String>> = {
                         let peers: std::collections::HashMap<String, nodeinnet_p2p::PeerConfig> =
-                            self.config.get_or_default("peers");
+                            self.peer_store.load();
                         let mut addrs_map = std::collections::HashMap::new();
                         for (id, peer) in peers {
                             addrs_map.insert(id, peer.last_known_addresses);
@@ -385,7 +385,7 @@ impl NetworkManager {
                             inbound.from_node_id.clone(),
                             self.private_key.clone(),
                             self.current_turn_credentials.clone(),
-                            self.config.clone(),
+                            self.peer_store.clone(),
                         )
                         .await
                         {
@@ -542,7 +542,7 @@ impl NetworkManager {
                         let cached_map: std::collections::HashMap<
                             String,
                             nodeinnet_p2p::PeerConfig,
-                        > = self.config.get_or_default("peers");
+                        > = self.peer_store.load();
                         if let Some(peer) = cached_map.get(&node_id) {
                             let addrs = &peer.last_known_addresses;
                             self.handler.on_log(format!("🔌 [AutoConnect] No active tunnel to {}. Attempting to reconnect direct signaling on cached addresses...", node_id)).await;
@@ -551,14 +551,14 @@ impl NetworkManager {
                                 let peer_id_clone = node_id.clone();
                                 let my_id_clone = self.my_info.id.clone();
                                 let private_key_b64_clone = self.private_key.clone();
-                                let config_clone = self.config.clone();
+                                let peer_store_clone = self.peer_store.clone();
                                 tokio::spawn(async move {
                                     let _ = p2p_node::local_mesh::connect_to_peer_signaling(
                                         addr_clone,
                                         peer_id_clone,
                                         my_id_clone,
                                         private_key_b64_clone,
-                                        config_clone,
+                                        peer_store_clone,
                                     )
                                     .await;
                                 });
@@ -613,7 +613,7 @@ impl NetworkManager {
                     node_id.clone(),
                     self.private_key.clone(),
                     self.current_turn_credentials.clone(),
-                    self.config.clone(),
+                    self.peer_store.clone(),
                 )
                 .await
                 {
@@ -728,7 +728,7 @@ impl NetworkManager {
                         let cached_map: std::collections::HashMap<
                             String,
                             nodeinnet_p2p::PeerConfig,
-                        > = self.config.get_or_default("peers");
+                        > = self.peer_store.load();
                         if let Some(peer) = cached_map.get(&node_id) {
                             let addrs = &peer.last_known_addresses;
                             self.handler.on_log(format!("🔌 [Call] No active tunnel to {}. Attempting to reconnect direct signaling on cached addresses...", node_id)).await;
@@ -737,14 +737,14 @@ impl NetworkManager {
                                 let peer_id_clone = node_id.clone();
                                 let my_id_clone = self.my_info.id.clone();
                                 let private_key_b64_clone = self.private_key.clone();
-                                let config_clone = self.config.clone();
+                                let peer_store_clone = self.peer_store.clone();
                                 tokio::spawn(async move {
                                     let _ = p2p_node::local_mesh::connect_to_peer_signaling(
                                         addr_clone,
                                         peer_id_clone,
                                         my_id_clone,
                                         private_key_b64_clone,
-                                        config_clone,
+                                        peer_store_clone,
                                     )
                                     .await;
                                 });
@@ -794,7 +794,7 @@ impl NetworkManager {
                     node_id.clone(),
                     self.private_key.clone(),
                     self.current_turn_credentials.clone(),
-                    self.config.clone(),
+                    self.peer_store.clone(),
                 )
                 .await
                 {
@@ -1002,7 +1002,7 @@ impl NetworkManager {
                 } else {
                     if let Some(pub_key) = nodeinnet_p2p::get_known_public_key(&peer_id) {
                         let peers: std::collections::HashMap<String, nodeinnet_p2p::PeerConfig> =
-                            self.config.get_or_default("peers");
+                            self.peer_store.load();
                         let (name, os) = if let Some(peer) = peers.get(&peer_id) {
                             (peer.name.clone(), peer.os.clone())
                         } else {
