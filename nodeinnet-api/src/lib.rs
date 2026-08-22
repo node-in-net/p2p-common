@@ -28,7 +28,7 @@ pub struct SharedResource {
 }
 
 impl SharedResource {
-    /// A copy safe to ANNOUNCE to peers/the server: `config` (which may hold a local.
+    /// A copy safe to announce: `config` (which may hold a local path) is stripped.
     pub fn without_config(&self) -> SharedResource {
         SharedResource {
             config: None,
@@ -82,7 +82,7 @@ pub struct NodeInfo {
 }
 
 impl NodeInfo {
-    /// A copy safe to ANNOUNCE to peers/the server: every resource's `config` (which may.
+    /// A copy safe to announce: every resource's `config` is stripped.
     pub fn announced(&self) -> NodeInfo {
         NodeInfo {
             resources: self.resources.iter().map(|r| r.without_config()).collect(),

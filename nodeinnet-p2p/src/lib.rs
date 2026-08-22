@@ -1,5 +1,3 @@
-//! The node.in.net peer-to-peer core.  Everything two peers need to agree on and.
-
 use serde::{Deserialize, Serialize};
 
 pub mod p2p;
@@ -10,7 +8,7 @@ pub use p2p::*;
 // the website links `nodeinnet-api` directly and never sees the protocol above.
 pub use nodeinnet_api::*;
 
-/// Base URL of the node.in.net service, as compiled in.  Prefer [`api_base()`] over.
+/// Compiled-in default; prefer [`api_base()`].
 #[cfg(debug_assertions)]
 pub const API_BASE: &str = "http://127.0.0.1:8030";
 #[cfg(not(debug_assertions))]
@@ -26,7 +24,7 @@ struct Endpoint {
     ws: Option<String>,
 }
 
-/// Point this process at a different node.in.net.  [`API_BASE`] is fixed at compile.
+/// Runtime override for [`API_BASE`], which is fixed at compile time.
 pub fn set_api_base(url: &str) {
     let mut ep = ENDPOINT.write().unwrap_or_else(|e| e.into_inner());
     ep.api = non_empty(url);

@@ -1,4 +1,4 @@
-//! Screen capture and input injection, as seen by the transport.  Encoding frames onto.
+//! Screen capture and input injection, as seen by the transport.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
@@ -45,7 +45,6 @@ pub fn install_desktop_provider(
     DESKTOP_PROVIDER.set(provider)
 }
 
-/// The installed provider, or `None` when this node never shares its screen.
 pub fn desktop_provider() -> Option<&'static Arc<dyn DesktopProvider>> {
     DESKTOP_PROVIDER.get()
 }

@@ -9,7 +9,9 @@ pub enum RtcSignal {
         ice_restart: bool,
     },
 
-    Answer { sdp: String },
+    Answer {
+        sdp: String,
+    },
 
     IceCandidate {
         candidate: String,
@@ -74,7 +76,6 @@ pub fn get_turn_credentials(
 
     let turn_servers_env = std::env::var("TURN_SERVERS").unwrap_or_default();
     let uris = if !turn_servers_env.trim().is_empty() {
-        // An explicit operator override describes the deployment we actually run, so it is.
         turn_servers_env
             .split(',')
             .map(|s| s.trim().to_string())

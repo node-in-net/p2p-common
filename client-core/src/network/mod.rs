@@ -258,7 +258,7 @@ pub async fn run_network_manager(
     }
 
     let (signal_tx, mut signal_rx) = tokio_mpsc::channel(100);
-    // `SIGNAL_TX` is a process-wide `OnceLock`. A SECOND manager in the same process finds.
+    // `SIGNAL_TX` is a process-wide `OnceLock`: a second manager here cannot claim it.
     let mut _unused_signal_tx = None;
     if let Err(returned) = p2p_node::local_mesh::SIGNAL_TX.set(signal_tx) {
         let _ = handler

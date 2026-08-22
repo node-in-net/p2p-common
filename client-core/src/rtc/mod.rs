@@ -130,8 +130,8 @@ async fn send_chunked_binary(
     let chunks_count = frames.len();
 
     // Backpressure instead of a fixed per-chunk delay, so small messages never wait.
-    const HIGH_WATER: usize = 1024 * 1024; // start pausing above 1 MB buffered
-    const LOW_WATER: usize = 256 * 1024; // resume once drained below 256 KB
+    const HIGH_WATER: usize = 1024 * 1024;
+    const LOW_WATER: usize = 256 * 1024;
     for frame in frames {
         dc.send(&bytes::Bytes::from(frame))
             .await
@@ -187,7 +187,6 @@ async fn wait_until_signaling_stable(
     }
 }
 
-/// Spawn a serialized Remote Desktop SDP renegotiation: create an offer covering the.
 #[cfg(feature = "feature-rdesk")]
 fn spawn_rdesk_renegotiation(
     pc: Arc<RTCPeerConnection>,
@@ -444,7 +443,7 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                             return;
                         }
                     } else {
-                        return; // Un-serializable message
+                        return;
                     }
                 } else {
                     handler.on_log(format!("🚨 SECURITY BREACH: Missing HMAC signature for resource {}! Command blocked.", res_id)).await;
@@ -1228,7 +1227,7 @@ impl WebRtcClient {
                                                  let clean_res_id = raw_track_id.strip_prefix("video-").unwrap_or(&raw_track_id).to_string();
 
                                                  let current_frame_compressed_size = accumulated_compressed_size;
-                                                 accumulated_compressed_size = 0; // reset for next frame
+                                                 accumulated_compressed_size = 0;
 
                                                  h.on_local_p2p_event(p2p_node::LocalP2pEvent::RemoteDesktopFrame {
                                                      resource_id: clean_res_id,
@@ -1432,7 +1431,7 @@ impl WebRtcClient {
                                     res_id
                                 ))
                                 .await;
-                            continue; // Skip the message entirely
+                            continue;
                         }
                     } else {
                         None

@@ -96,10 +96,10 @@ pub struct NodeContext {
     pub discovered_ips: Arc<Mutex<Vec<String>>>,
     pub peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 
-    /// Serializes all framed writes to this connection's WebRTC DataChannel. Multiple tasks.
+    /// Serializes all framed writes to this connection's WebRTC DataChannel.
     pub dc_write_lock: Arc<Mutex<()>>,
 
-    /// Serializes SDP (re)negotiations on this connection's PeerConnection. Remote Desktop.
+    /// Serializes SDP (re)negotiations on this connection's PeerConnection.
     pub negotiation_lock: Arc<Mutex<()>>,
 }
 
@@ -229,11 +229,11 @@ impl NodeContext {
                     if !allowed_types.is_empty() && !allowed_types.contains(&resource.resource_type)
                     {
                         self.log(format!("❌ RBAC Security Violation: Message {:?} is strictly forbidden for resource type {:?}", p2p_msg, resource.resource_type));
-                        return; // Drop message unconditionally
+                        return;
                     }
                 } else {
                     self.log(format!("❌ RBAC Security Violation: Peer attempted to access non-existent or unshared resource '{}'", res_id));
-                    return; // Drop message unconditionally
+                    return;
                 }
             }
         }
@@ -258,7 +258,7 @@ impl NodeContext {
                         &token[..4]
                     ));
                     res.session_token = Some(token.clone());
-                    // LOCAL-ONLY: never ship the resource's config (local path) to the peer — we resolve.
+                    // LOCAL-ONLY: never ship the resource's config (local path) to the peer.
                     res.config = None;
                     session_keys.insert(res.id.clone(), token);
                 }

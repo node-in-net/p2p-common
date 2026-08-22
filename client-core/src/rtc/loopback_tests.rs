@@ -165,7 +165,6 @@ async fn build_client(
     (Arc::new(client), net_rx, inbox)
 }
 
-/// Bring up two authenticated peers over real loopback WebRTC and return them with.
 async fn establish_authenticated_pair(
     verbose: bool,
 ) -> (
@@ -205,7 +204,6 @@ async fn establish_authenticated_pair(
     (a, b, b_inbox)
 }
 
-/// Close both peers' PeerConnections so their ICE agents/tasks stop and free loopback.
 async fn close_pair(a: &Arc<WebRtcClient>, b: &Arc<WebRtcClient>) {
     let _ = a.peer_connection.close().await;
     let _ = b.peer_connection.close().await;
@@ -297,7 +295,6 @@ async fn loopback_ice_restart_preserves_session() {
     close_pair(&a, &b).await;
 }
 
-/// Two tasks writing large multi-chunk messages to the SAME DataChannel concurrently,.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs loopback UDP; run with --ignored"]
 async fn loopback_concurrent_writes_stay_intact() {

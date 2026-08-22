@@ -469,7 +469,7 @@ async fn run_tunnel_loop(
                         }
                     }
                 } else {
-                    break; // Channel closed
+                    break;
                 }
             }
 
@@ -484,7 +484,7 @@ async fn run_tunnel_loop(
                         }
                     }
                     Err(_e) => {
-                        break; // Connection closed
+                        break;
                     }
                 }
             }
