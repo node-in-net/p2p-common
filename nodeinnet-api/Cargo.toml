@@ -1,0 +1,23 @@
+[package]
+name = "nodeinnet-api"
+version = "0.1.0"
+edition = "2021"
+description = "The contract every node.in.net client shares with the website: account REST payloads, the node/resource model, WebRTC signalling and password hashing. Carries no peer-to-peer protocol."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/node-in-net/p2p-common"
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.21"
+# TURN credential derivation in rtc::TurnCredentials (HMAC-SHA1, per RFC 5766)
+hmac = "0.12.1"
+sha1 = "0.10"
+# crypto: node identity (ed25519), p2p handshake signing, password hashing
+argon2 = "0.5"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+sha2 = "0.10.8"
+hex = "0.4.3"
