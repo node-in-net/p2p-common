@@ -2,6 +2,10 @@ pub use nodeinnet_api::{ResourceType, SharedResource};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+fn is_start(offset: &u64) -> bool {
+    *offset == 0
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "cmd", content = "data")]
 pub enum P2pMessage {
@@ -151,6 +155,10 @@ pub enum P2pMessage {
         resource_id: String,
         file_path: String,
         transfer_id: Uuid,
+        #[serde(default, skip_serializing_if = "is_start")]
+        offset: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<u64>,
     },
     FileUploadRequest {
         resource_id: String,
@@ -969,5 +977,68 @@ mod remote_launch_registration {
                 "the variant does not survive BSON"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ranged_downloads {
+    use super::*;
+
+    fn asking_for(offset: u64, length: Option<u64>) -> P2pMessage {
+        P2pMessage::FileDownloadRequest {
+            resource_id: "res".to_string(),
+            file_path: "/share/data.bin".to_string(),
+            transfer_id: Uuid::nil(),
+            offset,
+            length,
+        }
+    }
+
+    #[test]
+    fn asking_for_a_whole_file_is_byte_for_byte_what_it_always_was() {
+        let bytes = to_bson_vec(&asking_for(0, None)).expect("serialize");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("offset"), "the offset reached the wire");
+        assert!(!text.contains("length"), "the length reached the wire");
+    }
+
+    #[test]
+    fn a_stretch_of_a_file_survives_the_wire() {
+        let bytes = to_bson_vec(&asking_for(4, Some(3))).expect("serialize");
+        let restored: P2pMessage = from_bson_slice(&bytes).expect("deserialize");
+        match restored {
+            P2pMessage::FileDownloadRequest {
+                offset,
+                length,
+                file_path,
+                ..
+            } => {
+                assert_eq!(offset, 4);
+                assert_eq!(length, Some(3));
+                assert_eq!(file_path, "/share/data.bin");
+            }
+            other => panic!("the variant changed on the way: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_request_without_the_fields_reads_as_the_whole_file() {
+        let bytes = to_bson_vec(&asking_for(0, None)).expect("serialize");
+        let restored: P2pMessage = from_bson_slice(&bytes).expect("deserialize");
+        match restored {
+            P2pMessage::FileDownloadRequest { offset, length, .. } => {
+                assert_eq!(offset, 0);
+                assert_eq!(length, None);
+            }
+            other => panic!("the variant changed on the way: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_ranged_request_is_still_signed_against_its_resource() {
+        assert_eq!(
+            asking_for(4, Some(3)).resource_id().map(String::as_str),
+            Some("res")
+        );
     }
 }
