@@ -42,7 +42,7 @@ impl NetworkManager {
                                 .await;
                         } else {
                             self.handler
-                                .on_log(format!("📤 Sent P2P to {}: {}", focused, text))
+                                .on_log(format!("📤 Sent P2P to {}", focused))
                                 .await;
                         }
                     }

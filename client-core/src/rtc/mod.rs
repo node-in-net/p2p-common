@@ -305,20 +305,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             } else {
                 hex_str
             };
-
-            if let Ok(json) = serde_json::to_string(&p2p_msg) {
-                let s = if json.len() > 1000 {
-                    format!(
-                        "{}... [truncated]",
-                        json.chars().take(1000).collect::<String>()
-                    )
-                } else {
-                    json.clone()
-                };
-                handler
-                    .on_log(format!("📄 [INBOUND-DECODED] BSON->JSON: {}", s))
-                    .await;
-            }
         }
 
         if let P2pMessage::HandshakeResponse { ref resources } = p2p_msg {
@@ -359,11 +345,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                     let mut session_keys = node_context.session_keys.lock().await;
                     for res in my_resources.iter_mut() {
                         let token = nodeinnet_p2p::crypto::generate_session_token();
-                        handler.on_log(format!(
-                            "🔑 [P2P-NODE KEYGEN] Created local session token for resource: {} ({})",
-                            res.id,
-                            &token[..4]
-                        )).await;
                         res.session_token = Some(token.clone());
                         session_keys.insert(res.id.clone(), token);
                     }
@@ -539,10 +520,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             force_select,
         } = p2p_msg
         {
-            println!(
-                "[RTC LOG] Received RemoteDesktopRequest for resource_id: {}, start: {}, original_size: {}, force_select: {}, bitrate_bps: {:?}",
-                resource_id, start, original_size, force_select, bitrate_bps
-            );
             let success = node_context.my_info.resources.iter().any(|r| {
                 r.id == *resource_id
                     && r.is_active
@@ -556,11 +533,8 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                 let mut screen_h = None;
                 if start {
                     if let Some((w, h)) = desktop_provider().and_then(|p| p.primary_screen_size()) {
-                        println!("[RTC LOG] Detected primary screen size: {}x{}", w, h);
                         screen_w = Some(w);
                         screen_h = Some(h);
-                    } else {
-                        println!("[RTC LOG] Failed to detect primary screen size");
                     }
                 }
 
@@ -1177,11 +1151,7 @@ impl WebRtcClient {
         let mut turn_msg = String::new();
 
         if let Some(turn) = &turn_credentials {
-            turn_msg.push_str(&format!(
-                "turn:{} (username: {})",
-                turn.uris.join(", "),
-                turn.username
-            ));
+            turn_msg.push_str(&format!("turn:{}", turn.uris.join(", ")));
             ice_servers.push(RTCIceServer {
                 urls: turn.uris.clone(),
                 username: turn.username.clone(),
@@ -1543,23 +1513,6 @@ impl WebRtcClient {
                                     } else {
                                         hex_str
                                     };
-
-                                    if let Ok(json) = serde_json::to_string(&msg.message) {
-                                        let s = if json.len() > 1000 {
-                                            format!(
-                                                "{}... [truncated]",
-                                                json.chars().take(1000).collect::<String>()
-                                            )
-                                        } else {
-                                            json.clone()
-                                        };
-                                        handler_for_our_rx_loop
-                                            .on_log(format!(
-                                                "📤 [OUTBOUND-DESERIALIZED] JSON: {}",
-                                                s
-                                            ))
-                                            .await;
-                                    }
                                 }
 
                                 let s = if bson_bytes.len() > 100 {
@@ -2162,19 +2115,6 @@ impl WebRtcClient {
     }
 
     pub async fn send_p2p_message(&self, msg: P2pMessage) -> Result<(), String> {
-        let p2p_str = format!("{:?}", msg);
-        let msg_log = if p2p_str.len() > 100 {
-            format!(
-                "{}... [truncated]",
-                p2p_str.chars().take(100).collect::<String>()
-            )
-        } else {
-            p2p_str.clone()
-        };
-        self.handler
-            .on_log(format!("📦 [QUEUED] Message queued: {}", msg_log))
-            .await;
-
         let _ = self
             .node_context
             .outgoing_tx

@@ -8,7 +8,7 @@ repository = "https://github.com/node-in-net/p2p-common"
 publish = false
 
 [dependencies]
-nodeinnet-api = { workspace = true }
+nodeinnet-api = { path = "../nodeinnet-api" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.4", features = ["serde", "v4"] }

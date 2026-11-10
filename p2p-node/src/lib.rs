@@ -148,11 +148,6 @@ impl NodeContext {
             if let Some(key_hex) = session_keys.get(res_id) {
                 if let Ok(bson_bytes) = nodeinnet_p2p::p2p::to_bson_vec(&msg) {
                     let computed = nodeinnet_p2p::crypto::compute_hmac_sha256(&bson_bytes, key_hex);
-                    self.log(format!(
-                        "✍️ [p2p-node] Signed message for resource {} (MAC: {}...)",
-                        res_id,
-                        &computed[..8]
-                    ));
                     Some(computed)
                 } else {
                     self.log(
@@ -230,7 +225,7 @@ impl NodeContext {
                     let allowed_types = p2p_msg.allowed_resource_types();
                     if !allowed_types.is_empty() && !allowed_types.contains(&resource.resource_type)
                     {
-                        self.log(format!("❌ RBAC Security Violation: Message {:?} is strictly forbidden for resource type {:?}", p2p_msg, resource.resource_type));
+                        self.log(format!("❌ RBAC Security Violation: a message for resource '{}' is forbidden for resource type {:?}", res_id, resource.resource_type));
                         return;
                     }
                 } else {
@@ -254,11 +249,6 @@ impl NodeContext {
 
                 for res in my_resources.iter_mut() {
                     let token = nodeinnet_p2p::crypto::generate_session_token();
-                    self.log(format!(
-                        "🔑 [P2P-NODE KEYGEN] Created local session token for resource: {} ({})",
-                        res.id,
-                        &token[..4]
-                    ));
                     res.session_token = Some(token.clone());
                     res.config = None;
                     session_keys.insert(res.id.clone(), token);

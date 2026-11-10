@@ -14,9 +14,7 @@ pub async fn handle_core_message(
     peer_connection: Arc<webrtc::peer_connection::RTCPeerConnection>,
 ) {
     match p2p_msg {
-        P2pMessage::TextMessage { text } => {
-            handler.on_log(format!("📦 [WebRTC Msg]: {}", text)).await;
-        }
+        P2pMessage::TextMessage { .. } => {}
         P2pMessage::Handshake {
             node_version,
             timestamp_ms,

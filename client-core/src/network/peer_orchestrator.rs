@@ -253,18 +253,6 @@ impl NetworkManager {
                                 node_id_clone
                             ))
                             .await;
-                        let p2p_str = format!("{:?}", sync_msg);
-                        let msg_log = if p2p_str.len() > 100 {
-                            format!(
-                                "{}... [truncated]",
-                                p2p_str.chars().take(100).collect::<String>()
-                            )
-                        } else {
-                            p2p_str.clone()
-                        };
-                        handler_clone
-                            .on_log(format!("📦 [QUEUED] Message queued: {}", msg_log))
-                            .await;
                         if let Err(e) = outgoing_tx
                             .send(nodeinnet_p2p::OutboundP2pPayload::UnsignedMessage(sync_msg))
                             .await

@@ -8,10 +8,10 @@ repository = "https://github.com/node-in-net/p2p-common"
 publish = false
 
 [dependencies]
-nodeinnet-p2p = { workspace = true }
-p2p-node = { workspace = true, default-features = false }
+nodeinnet-p2p = { path = "../nodeinnet-p2p" }
+p2p-node = { path = "../p2p-node", default-features = false }
 
-tokio = { workspace = true, features = ["full"] }
+tokio = { version = "1.36", features = ["full"] }
 tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 webrtc = "0.6"
@@ -21,7 +21,7 @@ reqwest = { version = "0.11", default-features = false, features = ["json", "rus
 uuid = { version = "1.6", features = ["v4"] }
 log = "0.4"
 async-trait = "0.1"
-bytes.workspace = true
+bytes = { version = "1.6.0", features = ["serde"] }
 bson = { version = "3.1.0", features = ["serde"] }
 openh264 = { version = "0.4", optional = true }
 openh264-sys2 = { version = "0.4", optional = true }
