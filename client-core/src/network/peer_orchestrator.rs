@@ -1,8 +1,8 @@
 use super::manager::NetworkManager;
 use super::types::{NetworkMode, PeerBackoff, get_cooldown_duration};
 use crate::NetCmd;
+use nodeinnet_p2p::NodeInfo;
 use nodeinnet_p2p::rtc::{RtcSignal, RtcSignalEnvelope};
-use nodeinnet_p2p::{NodeInfo, P2pMessage};
 use p2p_node::local_mesh::LocalMeshSignal;
 
 impl NetworkManager {
@@ -35,33 +35,7 @@ impl NetworkManager {
                     }
                 }
             }
-            NetworkMode::LocalMeshFallback => {
-                let offline_targets: Vec<String> = self
-                    .last_known_nodes
-                    .values()
-                    .filter(|node| {
-                        node.app_type != "web"
-                            && (node.id > self.my_info.id
-                                || self.focused_peer == Some(node.id.clone()))
-                            && !self.active_peers.contains_key(&node.id)
-                    })
-                    .map(|node| node.id.clone())
-                    .collect();
-
-                for node_id in offline_targets {
-                    let should_retry = if let Some(backoff) = self.backoff_states.get(&node_id) {
-                        let cooldown = get_cooldown_duration(backoff.attempt_count);
-                        backoff.last_attempt.elapsed() >= cooldown
-                    } else {
-                        true
-                    };
-
-                    if should_retry {
-                        let _ = self.net_tx_bg.send(NetCmd::AutoConnect(node_id)).await;
-                    }
-                }
-            }
-            NetworkMode::WebSocketConnecting => {}
+            NetworkMode::LocalMeshFallback | NetworkMode::WebSocketConnecting => {}
         }
     }
 
@@ -224,48 +198,6 @@ impl NetworkManager {
                         node_id
                     ))
                     .await;
-
-                if let Some(peer) = self.active_peers.get(&node_id) {
-                    let sync_nodes: Vec<NodeInfo> =
-                        self.last_known_nodes.values().cloned().collect();
-                    let sync_addresses: std::collections::HashMap<String, Vec<String>> = {
-                        let peers: std::collections::HashMap<String, nodeinnet_p2p::PeerConfig> =
-                            self.peer_store.load();
-                        let mut addrs_map = std::collections::HashMap::new();
-                        for (id, peer) in peers {
-                            addrs_map.insert(id, peer.last_known_addresses);
-                        }
-                        addrs_map
-                    };
-
-                    let sync_msg = P2pMessage::PeersSync {
-                        nodes: sync_nodes,
-                        addresses: sync_addresses,
-                    };
-
-                    let outgoing_tx = peer.node_context.outgoing_tx.clone();
-                    let handler_clone = self.handler.clone();
-                    let node_id_clone = node_id.clone();
-                    tokio::spawn(async move {
-                        handler_clone
-                            .on_log(format!(
-                                "📤 Sending mesh PeersSync to peer {}",
-                                node_id_clone
-                            ))
-                            .await;
-                        if let Err(e) = outgoing_tx
-                            .send(nodeinnet_p2p::OutboundP2pPayload::UnsignedMessage(sync_msg))
-                            .await
-                        {
-                            handler_clone
-                                .on_log(format!(
-                                    "❌ Failed to send mesh PeersSync to {}: {:?}",
-                                    node_id_clone, e
-                                ))
-                                .await;
-                        }
-                    });
-                }
             }
             NetCmd::HandleInboundSignal(inbound) => match inbound.signal {
                 RtcSignal::Offer { sdp, ice_restart } => {
@@ -533,42 +465,7 @@ impl NetworkManager {
                 }
 
                 if self.current_ws_tx.is_none() {
-                    let has_tunnel = {
-                        if let Some(tunnels) = p2p_node::local_mesh::ACTIVE_TCP_TUNNELS.get() {
-                            tunnels.lock().await.contains_key(&node_id)
-                        } else {
-                            false
-                        }
-                    };
-                    if !has_tunnel {
-                        let cached_map: std::collections::HashMap<
-                            String,
-                            nodeinnet_p2p::PeerConfig,
-                        > = self.peer_store.load();
-                        if let Some(peer) = cached_map.get(&node_id) {
-                            let addrs = &peer.last_known_addresses;
-                            self.handler.on_log(format!("🔌 [AutoConnect] No active tunnel to {}. Attempting to reconnect direct signaling on cached addresses...", node_id)).await;
-                            for addr in addrs {
-                                let addr_clone = addr.clone();
-                                let peer_id_clone = node_id.clone();
-                                let my_id_clone = self.my_info.id.clone();
-                                let private_key_b64_clone = self.private_key.clone();
-                                let peer_store_clone = self.peer_store.clone();
-                                tokio::spawn(async move {
-                                    let _ = p2p_node::local_mesh::connect_to_peer_signaling(
-                                        addr_clone,
-                                        peer_id_clone,
-                                        my_id_clone,
-                                        private_key_b64_clone,
-                                        peer_store_clone,
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                        self.handler.on_log(format!("⏳ [AutoConnect] Postponing WebRTC connection to {} until direct signaling tunnel is established", node_id)).await;
-                        return;
-                    }
+                    return;
                 }
 
                 let peer_name = self
@@ -743,42 +640,7 @@ impl NetworkManager {
                 backoff.is_connected = false;
 
                 if self.current_ws_tx.is_none() {
-                    let has_tunnel = {
-                        if let Some(tunnels) = p2p_node::local_mesh::ACTIVE_TCP_TUNNELS.get() {
-                            tunnels.lock().await.contains_key(&node_id)
-                        } else {
-                            false
-                        }
-                    };
-                    if !has_tunnel {
-                        let cached_map: std::collections::HashMap<
-                            String,
-                            nodeinnet_p2p::PeerConfig,
-                        > = self.peer_store.load();
-                        if let Some(peer) = cached_map.get(&node_id) {
-                            let addrs = &peer.last_known_addresses;
-                            self.handler.on_log(format!("🔌 [Call] No active tunnel to {}. Attempting to reconnect direct signaling on cached addresses...", node_id)).await;
-                            for addr in addrs {
-                                let addr_clone = addr.clone();
-                                let peer_id_clone = node_id.clone();
-                                let my_id_clone = self.my_info.id.clone();
-                                let private_key_b64_clone = self.private_key.clone();
-                                let peer_store_clone = self.peer_store.clone();
-                                tokio::spawn(async move {
-                                    let _ = p2p_node::local_mesh::connect_to_peer_signaling(
-                                        addr_clone,
-                                        peer_id_clone,
-                                        my_id_clone,
-                                        private_key_b64_clone,
-                                        peer_store_clone,
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                        self.handler.on_log(format!("⏳ [Call] Postponing WebRTC connection to {} until direct signaling tunnel is established", node_id)).await;
-                        return;
-                    }
+                    return;
                 }
 
                 let peer_name = self
@@ -859,66 +721,6 @@ impl NetworkManager {
                             .await;
                     }
                 }
-            }
-            NetCmd::MergeNodesList(nodes) => {
-                let mut handler_log_for_nodes =
-                    "📋 [MESH] Merging nodes list from peer:\n".to_string();
-                for n in &nodes {
-                    handler_log_for_nodes.push_str(&format!(
-                        "  - {} ({}, OS: {}) Resources: ",
-                        n.name, n.id, n.os
-                    ));
-                    if n.resources.is_empty() {
-                        handler_log_for_nodes.push_str("none\n");
-                    } else {
-                        for r in &n.resources {
-                            handler_log_for_nodes
-                                .push_str(&format!("{:?} [{}], ", r.resource_type, r.id));
-                        }
-                        handler_log_for_nodes.push('\n');
-                    }
-                }
-                self.handler.on_log(handler_log_for_nodes).await;
-
-                for node in nodes {
-                    if node.id == self.my_info.id {
-                        continue;
-                    }
-                    if let Some(old_info) = self.last_known_nodes.get_mut(&node.id) {
-                        if node.is_online {
-                            if !old_info.is_online {
-                                self.handler.on_log(format!("✨ Peer {} ({}) came ONLINE via mesh sync. Resetting its backoff for instant connection!", node.id, node.name)).await;
-                                if let Some(backoff) = self.backoff_states.get_mut(&node.id) {
-                                    backoff.attempt_count = 0;
-                                    backoff.is_connected = false;
-                                }
-                            }
-                            old_info.is_online = true;
-                        }
-
-                        if !node.resources.is_empty() {
-                            old_info.resources = node.resources;
-                        }
-
-                        if old_info.os == "unknown" && node.os != "unknown" {
-                            old_info.os = node.os;
-                        }
-                        if old_info.name == old_info.id && node.name != node.id {
-                            old_info.name = node.name;
-                        }
-                    } else {
-                        if node.is_online
-                            && let Some(backoff) = self.backoff_states.get_mut(&node.id)
-                        {
-                            backoff.attempt_count = 0;
-                            backoff.is_connected = false;
-                        }
-                        self.last_known_nodes.insert(node.id.clone(), node);
-                    }
-                }
-
-                let all_nodes: Vec<NodeInfo> = self.last_known_nodes.values().cloned().collect();
-                let _ = self.handler.on_update_nodes(all_nodes).await;
             }
             _ => {}
         }

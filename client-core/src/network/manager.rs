@@ -67,8 +67,7 @@ impl NetworkManager {
             | NetCmd::PeerConnected(..)
             | NetCmd::HandleInboundSignal(..)
             | NetCmd::AutoConnect(..)
-            | NetCmd::Call(..)
-            | NetCmd::MergeNodesList(..) => {
+            | NetCmd::Call(..) => {
                 self.handle_peer_cmd(cmd).await;
             }
             NetCmd::Send(..)
@@ -85,7 +84,25 @@ impl NetworkManager {
                     self.start_local_discovery();
                 }
             }
+            NetCmd::Shutdown => self.shutdown().await,
         }
+    }
+
+    pub async fn shutdown(&mut self) {
+        self.current_ws_tx = None;
+        for task in self.ws_tasks.drain(..) {
+            task.abort();
+        }
+        let closing: Vec<_> = self
+            .active_peers
+            .drain()
+            .map(|(_, peer)| peer.peer_connection.clone())
+            .collect();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            futures_util::future::join_all(closing.iter().map(|pc| pc.close())),
+        )
+        .await;
     }
 
     pub fn start_local_discovery(&mut self) {
@@ -107,7 +124,6 @@ impl NetworkManager {
             match p2p_node::local_mesh::start_tcp_signaling_server(
                 my_id_local.clone(),
                 priv_key_local.clone(),
-                peer_store_local.clone(),
             )
             .await
             {

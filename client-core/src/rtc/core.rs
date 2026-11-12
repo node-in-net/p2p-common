@@ -11,7 +11,6 @@ pub async fn handle_core_message(
     node_context: NodeContext,
     target_node_id: String,
     last_pong: Arc<AtomicU64>,
-    peer_connection: Arc<webrtc::peer_connection::RTCPeerConnection>,
 ) {
     match p2p_msg {
         P2pMessage::TextMessage { .. } => {}
@@ -113,36 +112,11 @@ pub async fn handle_core_message(
                     target_node_id
                 ))
                 .await;
-            node_context
+            if !node_context
                 .is_authenticated
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            handler.on_p2p_connected(target_node_id.clone()).await;
-            crate::rtc::spawn_connection_type_poller(
-                peer_connection.clone(),
-                target_node_id.clone(),
-                handler.clone(),
-            );
-
-            if let Some(port) = local_tcp_port {
-                let ips = node_context.discovered_ips.lock().await;
-                if !ips.is_empty() {
-                    handler
-                        .on_log(format!(
-                            "💾 [CACHE] Caching last known peer IPs for {}: {:?} on port {}",
-                            target_node_id, *ips, port
-                        ))
-                        .await;
-                    node_context
-                        .peer_store
-                        .update(&mut |map: &mut std::collections::HashMap<
-                            String,
-                            nodeinnet_p2p::PeerConfig,
-                        >| {
-                            let entry = map.entry(target_node_id.clone()).or_default();
-                            entry.last_known_addresses =
-                                ips.iter().map(|ip| format!("{}:{}", ip, port)).collect();
-                        });
-                }
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                handler.on_p2p_connected(target_node_id.clone()).await;
             }
 
             if let Some(c_size) = peer_max_chunk_size_req {

@@ -2,7 +2,7 @@ pub mod local_mesh;
 pub mod mdns_discovery;
 
 use nodeinnet_p2p::{NodeInfo, P2pMessage};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -61,7 +61,12 @@ pub enum LocalP2pEvent {
     },
 }
 
-pub type ActiveDownload = (PathBuf, u64, Option<u32>);
+pub type ActiveDownload = (
+    PathBuf,
+    u64,
+    Option<u32>,
+    Option<Arc<Mutex<tokio::fs::File>>>,
+);
 
 pub type ActiveTerminal = (mpsc::Sender<Vec<u8>>, mpsc::Sender<(u16, u16)>, uuid::Uuid);
 
@@ -78,11 +83,14 @@ pub struct NodeContext {
     pub peer_id: String,
 
     pub is_authenticated: Arc<AtomicBool>,
+    pub session_up: Arc<AtomicBool>,
 
     pub remote_resources: Arc<Mutex<HashMap<nodeinnet_p2p::p2p::ResourceType, String>>>,
+    pub peer_resources: Arc<Mutex<Option<Vec<nodeinnet_p2p::SharedResource>>>>,
 
     pub active_uploads: Arc<Mutex<HashMap<uuid::Uuid, PathBuf>>>,
     pub active_downloads: Arc<Mutex<HashMap<uuid::Uuid, ActiveDownload>>>,
+    pub requested_downloads: Arc<Mutex<HashSet<uuid::Uuid>>>,
 
     pub active_terminals: Arc<Mutex<HashMap<String, ActiveTerminal>>>,
     pub active_socks_streams: Arc<Mutex<HashMap<uuid::Uuid, mpsc::Sender<Vec<u8>>>>>,
@@ -93,7 +101,6 @@ pub struct NodeContext {
     pub rx_binary_buffers: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 
     pub peer_max_chunk_size: Arc<std::sync::atomic::AtomicUsize>,
-    pub discovered_ips: Arc<Mutex<Vec<String>>>,
     pub peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 
     pub dc_write_lock: Arc<Mutex<()>>,
@@ -117,9 +124,12 @@ impl NodeContext {
             my_info,
             peer_id,
             is_authenticated: Arc::new(AtomicBool::new(false)),
+            session_up: Arc::new(AtomicBool::new(false)),
             remote_resources: Arc::new(Mutex::new(HashMap::new())),
+            peer_resources: Arc::new(Mutex::new(None)),
             active_uploads: Arc::new(Mutex::new(HashMap::new())),
             active_downloads: Arc::new(Mutex::new(HashMap::new())),
+            requested_downloads: Arc::new(Mutex::new(HashSet::new())),
 
             active_terminals: Arc::new(Mutex::new(HashMap::new())),
             active_socks_streams: Arc::new(Mutex::new(HashMap::new())),
@@ -127,7 +137,6 @@ impl NodeContext {
             session_keys: Arc::new(Mutex::new(HashMap::new())),
             rx_binary_buffers: Arc::new(Mutex::new(HashMap::new())),
             peer_max_chunk_size: Arc::new(std::sync::atomic::AtomicUsize::new(10240)),
-            discovered_ips: Arc::new(Mutex::new(Vec::new())),
             peer_store,
             dc_write_lock: Arc::new(Mutex::new(())),
             negotiation_lock: Arc::new(Mutex::new(())),
@@ -221,7 +230,12 @@ impl NodeContext {
 
         if !is_response {
             if let Some(res_id) = p2p_msg.resource_id() {
-                if let Some(resource) = self.my_info.resources.iter().find(|r| r.id == *res_id) {
+                if let Some(resource) = self
+                    .my_info
+                    .resources
+                    .iter()
+                    .find(|r| r.id == *res_id && r.is_active)
+                {
                     let allowed_types = p2p_msg.allowed_resource_types();
                     if !allowed_types.is_empty() && !allowed_types.contains(&resource.resource_type)
                     {
@@ -243,6 +257,7 @@ impl NodeContext {
                 let mut my_resources = self.my_info.resources.clone();
                 let mut session_keys = self.session_keys.lock().await;
 
+                my_resources.retain(|r| r.is_active);
                 if let Some(req_types) = requested_resources {
                     my_resources.retain(|r| req_types.contains(&r.resource_type));
                 }
@@ -377,5 +392,122 @@ mod tests {
 
         ctx.shutdown().await;
         assert!(ctx.session_keys.lock().await.is_empty());
+    }
+
+    fn sharing_on_and_off() -> (
+        NodeContext,
+        mpsc::Receiver<nodeinnet_p2p::OutboundP2pPayload>,
+        mpsc::Receiver<String>,
+    ) {
+        let resource = |id: &str, is_active| nodeinnet_p2p::SharedResource {
+            id: id.to_string(),
+            name: id.to_string(),
+            resource_type: nodeinnet_p2p::ResourceType::Filesystem,
+            config: None,
+            is_active,
+            session_token: None,
+        };
+        let mut info = make_test_node_info();
+        info.resources = vec![resource("fs-on", true), resource("fs-off", false)];
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(8);
+        let (log_tx, log_rx) = mpsc::channel(8);
+        let (event_tx, _) = mpsc::channel(1);
+        let ctx = NodeContext::new(
+            outgoing_tx,
+            log_tx,
+            event_tx,
+            info,
+            "test-peer".to_string(),
+            std::sync::Arc::new(NoPeerStore),
+        );
+        (ctx, outgoing_rx, log_rx)
+    }
+
+    #[tokio::test]
+    async fn a_switched_off_resource_gets_no_token_in_the_handshake() {
+        let (ctx, mut outgoing_rx, _log_rx) = sharing_on_and_off();
+        ctx.process_message(P2pMessage::Handshake {
+            node_version: "1.0".to_string(),
+            timestamp_ms: 0,
+            signature: String::new(),
+            requested_resources: None,
+            max_chunk_size: None,
+            local_tcp_port: None,
+            from_node_id: None,
+        })
+        .await;
+
+        let Ok(nodeinnet_p2p::OutboundP2pPayload::Message(nodeinnet_p2p::SecuredP2pEnvelope {
+            message: P2pMessage::HandshakeResponse { resources },
+            ..
+        })) = outgoing_rx.try_recv()
+        else {
+            panic!("no HandshakeResponse");
+        };
+        let listed: Vec<&str> = resources.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(listed, ["fs-on"]);
+        let keys = ctx.session_keys.lock().await;
+        assert_eq!(
+            keys.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["fs-on"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_server_is_told_what_the_handshake_lists() {
+        let (ctx, mut outgoing_rx, _log_rx) = sharing_on_and_off();
+        ctx.process_message(P2pMessage::Handshake {
+            node_version: "1.0".to_string(),
+            timestamp_ms: 0,
+            signature: String::new(),
+            requested_resources: None,
+            max_chunk_size: None,
+            local_tcp_port: None,
+            from_node_id: None,
+        })
+        .await;
+        let Ok(nodeinnet_p2p::OutboundP2pPayload::Message(nodeinnet_p2p::SecuredP2pEnvelope {
+            message: P2pMessage::HandshakeResponse { resources },
+            ..
+        })) = outgoing_rx.try_recv()
+        else {
+            panic!("no HandshakeResponse");
+        };
+        let stored: Vec<_> = resources
+            .into_iter()
+            .map(|r| nodeinnet_p2p::SharedResource {
+                session_token: None,
+                ..r
+            })
+            .collect();
+        assert_eq!(
+            serde_json::to_string(&ctx.my_info.announced().resources).unwrap(),
+            serde_json::to_string(&stored).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_for_a_switched_off_resource_is_refused() {
+        let (ctx, mut outgoing_rx, mut log_rx) = sharing_on_and_off();
+        for id in ["fs-on", "fs-off"] {
+            ctx.process_message(P2pMessage::RequestEntries {
+                request_id: uuid::Uuid::new_v4(),
+                resource_id: id.to_string(),
+                path: "/".to_string(),
+            })
+            .await;
+        }
+        drop(ctx);
+
+        let mut logged = Vec::new();
+        while let Some(line) = log_rx.recv().await {
+            logged.push(line);
+        }
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(
+            logged[0].contains("RBAC") && logged[0].contains("'fs-off'"),
+            "{logged:?}"
+        );
+        assert!(outgoing_rx.try_recv().is_err());
     }
 }

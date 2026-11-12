@@ -3,7 +3,7 @@ use crate::{AppEventHandler, NetCmd};
 use nodeinnet_p2p::rtc::RtcSignal;
 use nodeinnet_p2p::{NodeInfo, P2pMessage, WsMessage};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -69,10 +69,13 @@ fn spawn_ice_router(
     target: Arc<WebRtcClient>,
     ready: Arc<AtomicBool>,
     buf: IceBuffer,
+    announced: Arc<AtomicUsize>,
 ) {
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
-            if let NetCmd::Send(WsMessage::RtcSignal(env)) = cmd
+            if let NetCmd::PeerConnected(..) = cmd {
+                announced.fetch_add(1, Ordering::SeqCst);
+            } else if let NetCmd::Send(WsMessage::RtcSignal(env)) = cmd
                 && let RtcSignal::IceCandidate {
                     candidate,
                     sdp_mid,
@@ -171,6 +174,19 @@ async fn establish_authenticated_pair(
     Arc<WebRtcClient>,
     Arc<Mutex<Vec<P2pMessage>>>,
 ) {
+    let (a, b, b_inbox, _, _) = establish_counted_pair(verbose).await;
+    (a, b, b_inbox)
+}
+
+async fn establish_counted_pair(
+    verbose: bool,
+) -> (
+    Arc<WebRtcClient>,
+    Arc<WebRtcClient>,
+    Arc<Mutex<Vec<P2pMessage>>>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
     let (a_priv, a_pub) = nodeinnet_p2p::crypto::generate_ed25519_keypair();
     let (b_priv, b_pub) = nodeinnet_p2p::crypto::generate_ed25519_keypair();
     let a_id = uuid::Uuid::new_v4().to_string();
@@ -187,8 +203,22 @@ async fn establish_authenticated_pair(
     let b_ready = Arc::new(AtomicBool::new(false));
     let a_buf: IceBuffer = Arc::new(Mutex::new(Vec::new()));
     let b_buf: IceBuffer = Arc::new(Mutex::new(Vec::new()));
-    spawn_ice_router(a_net_rx, b.clone(), b_ready.clone(), b_buf.clone());
-    spawn_ice_router(b_net_rx, a.clone(), a_ready.clone(), a_buf.clone());
+    let a_announced = Arc::new(AtomicUsize::new(0));
+    let b_announced = Arc::new(AtomicUsize::new(0));
+    spawn_ice_router(
+        a_net_rx,
+        b.clone(),
+        b_ready.clone(),
+        b_buf.clone(),
+        a_announced.clone(),
+    );
+    spawn_ice_router(
+        b_net_rx,
+        a.clone(),
+        a_ready.clone(),
+        a_buf.clone(),
+        b_announced.clone(),
+    );
 
     let offer = a.create_offer().await.expect("create_offer");
     let answer = b.accept_offer_and_answer(offer).await.expect("answer");
@@ -200,7 +230,7 @@ async fn establish_authenticated_pair(
         wait_for_auth(&a, &b, Duration::from_secs(30)).await,
         "peers did not complete Zero-Trust authentication within 30s"
     );
-    (a, b, b_inbox)
+    (a, b, b_inbox, a_announced, b_announced)
 }
 
 async fn close_pair(a: &Arc<WebRtcClient>, b: &Arc<WebRtcClient>) {
@@ -349,4 +379,64 @@ async fn loopback_concurrent_writes_stay_intact() {
         "second concurrent message was lost/corrupted"
     );
     close_pair(&a, &b).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs loopback UDP; run with --ignored"]
+async fn loopback_each_side_announces_the_session_once() {
+    let verbose = std::env::var("RTC_TEST_VERBOSE").is_ok();
+    let (a, b, _b_inbox, a_announced, b_announced) = establish_counted_pair(verbose).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while (a_announced.load(Ordering::SeqCst) == 0 || b_announced.load(Ordering::SeqCst) == 0)
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        a_announced.load(Ordering::SeqCst),
+        1,
+        "A announced the session"
+    );
+    assert_eq!(
+        b_announced.load(Ordering::SeqCst),
+        1,
+        "B announced the session"
+    );
+    close_pair(&a, &b).await;
+}
+
+#[tokio::test]
+async fn a_download_request_is_registered_on_its_way_out() {
+    let me = make_node(&uuid::Uuid::new_v4().to_string(), "");
+    let (client, _net_rx, _inbox) = build_client(&me, "peer", "", false, "A").await;
+    let ctx = &client.node_context;
+    ctx.is_authenticated.store(true, Ordering::SeqCst);
+    ctx.session_keys.lock().await.insert(
+        "fs-theirs".to_string(),
+        nodeinnet_p2p::crypto::generate_session_token(),
+    );
+    let transfer_id = uuid::Uuid::new_v4();
+
+    client
+        .send_p2p_message(P2pMessage::FileDownloadRequest {
+            resource_id: "fs-theirs".to_string(),
+            file_path: "/bob.txt".to_string(),
+            transfer_id,
+            offset: 0,
+            length: None,
+        })
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while client.pending_messages.lock().await.is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pipeline never queued the request"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(ctx.requested_downloads.lock().await.contains(&transfer_id));
 }

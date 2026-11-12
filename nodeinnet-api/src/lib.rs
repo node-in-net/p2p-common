@@ -82,7 +82,12 @@ pub struct NodeInfo {
 impl NodeInfo {
     pub fn announced(&self) -> NodeInfo {
         NodeInfo {
-            resources: self.resources.iter().map(|r| r.without_config()).collect(),
+            resources: self
+                .resources
+                .iter()
+                .filter(|r| r.is_active)
+                .map(|r| r.without_config())
+                .collect(),
             ..self.clone()
         }
     }

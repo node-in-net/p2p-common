@@ -139,7 +139,6 @@ pub fn start_mdns_scanner(
                                     let addr_clone = addr.clone();
                                     let my_id_clone = my_id.clone();
                                     let private_key_b64_clone = private_key_b64.clone();
-                                    let peer_store_clone = peer_store.clone();
 
                                     tokio::spawn(async move {
                                         let _ = local_mesh::connect_to_peer_signaling(
@@ -147,7 +146,6 @@ pub fn start_mdns_scanner(
                                             peer_id_clone,
                                             my_id_clone,
                                             private_key_b64_clone,
-                                            peer_store_clone,
                                         )
                                         .await;
                                     });

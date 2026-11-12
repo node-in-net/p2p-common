@@ -21,12 +21,6 @@ impl NetworkManager {
         self.handler.on_disconnected().await;
 
         self.mode = NetworkMode::LocalMeshFallback;
-
-        super::trigger_cached_peer_reconnections(
-            self.my_info.id.clone(),
-            self.private_key.clone(),
-            self.peer_store.clone(),
-        );
     }
 
     pub async fn handle_ws_cmd(&mut self, cmd: NetCmd) {

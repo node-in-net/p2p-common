@@ -4,6 +4,8 @@ pub mod core;
 pub mod video_utils;
 
 #[cfg(test)]
+mod gate_tests;
+#[cfg(test)]
 mod loopback_tests;
 
 use crate::NetCmd;
@@ -308,10 +310,21 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
         }
 
         if let P2pMessage::HandshakeResponse { ref resources } = p2p_msg {
+            let theirs: Vec<nodeinnet_p2p::SharedResource> = resources
+                .iter()
+                .filter(|res| {
+                    !node_context
+                        .my_info
+                        .resources
+                        .iter()
+                        .any(|mine| mine.id == res.id)
+                })
+                .cloned()
+                .collect();
             let mut log_str = "🔑 [AUTH] Received HandshakeResponse. Key saved:\n".to_string();
             let mut keys = node_context.session_keys.lock().await;
             let mut types = node_context.remote_resources.lock().await;
-            for res in resources {
+            for res in &theirs {
                 log_str.push_str(&format!("  -> {:?} ({})\n", res.resource_type, res.id));
                 types.insert(res.resource_type.clone(), res.id.clone());
                 if let Some(token) = &res.session_token {
@@ -322,98 +335,26 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             drop(types);
             handler.on_log(log_str).await;
 
-            let was_authenticated = node_context.is_authenticated.swap(true, Ordering::SeqCst);
-            handler
-                .on_peer_state_changed(target_node_id.clone(), crate::P2pPeerState::Connected)
-                .await;
-
-            let _ = net_tx
-                .send(crate::NetCmd::PeerConnected(
-                    target_node_id.clone(),
-                    resources.clone(),
-                ))
-                .await;
-
-            if !was_authenticated {
-                spawn_connection_type_poller(
-                    peer_connection.clone(),
-                    target_node_id.clone(),
-                    handler.clone(),
-                );
-                let mut my_resources = node_context.my_info.resources.clone();
-                {
-                    let mut session_keys = node_context.session_keys.lock().await;
-                    for res in my_resources.iter_mut() {
-                        let token = nodeinnet_p2p::crypto::generate_session_token();
-                        res.session_token = Some(token.clone());
-                        session_keys.insert(res.id.clone(), token);
-                    }
-                }
-
-                handler
-                    .on_log(format!(
-                        "🤝 Sending symmetric HandshakeResponse back to {}",
-                        target_node_id
-                    ))
-                    .await;
-                let return_msg = P2pMessage::HandshakeResponse {
-                    resources: my_resources,
-                };
-                let envelope = nodeinnet_p2p::SecuredP2pEnvelope {
-                    mac: None,
-                    message: return_msg,
-                };
-                if let Ok(bson_bytes) = nodeinnet_p2p::p2p::to_bson_vec(&envelope) {
-                    let max_c = 10240;
-                    let _ = send_chunked_binary(
-                        &dc,
-                        &bson_bytes,
-                        max_c,
-                        &handler,
-                        &node_context.dc_write_lock,
-                    )
-                    .await;
-                }
-            }
-
+            *node_context.peer_resources.lock().await = Some(
+                theirs
+                    .into_iter()
+                    .map(|res| nodeinnet_p2p::SharedResource {
+                        config: None,
+                        session_token: None,
+                        ..res
+                    })
+                    .collect(),
+            );
+            announce_session(
+                &node_context,
+                &handler,
+                &net_tx,
+                &peer_connection,
+                &target_node_id,
+            )
+            .await;
             return;
-        } else if let P2pMessage::PeersSync {
-            ref nodes,
-            ref addresses,
-        } = p2p_msg
-        {
-            handler
-                .on_log(format!(
-                    "🔄 [MESH] Received PeersSync from {}: {} nodes, {} addresses",
-                    target_node_id,
-                    nodes.len(),
-                    addresses.len()
-                ))
-                .await;
-
-            nodeinnet_p2p::update_known_public_keys(nodes);
-            node_context
-                .peer_store
-                .update(&mut |map: &mut std::collections::HashMap<
-                    String,
-                    nodeinnet_p2p::PeerConfig,
-                >| {
-                    for node in nodes {
-                        let entry = map.entry(node.id.clone()).or_default();
-                        entry.public_key = node.public_key.clone();
-                        entry.name = node.name.clone();
-                        entry.os = node.os.clone();
-                    }
-                    for (peer_id, addrs) in addresses {
-                        let entry = map.entry(peer_id.clone()).or_default();
-                        entry.last_known_addresses = addrs.clone();
-                    }
-                });
-
-            let _ = net_tx
-                .send(crate::NetCmd::MergeNodesList(nodes.clone()))
-                .await;
-
+        } else if let P2pMessage::PeersSync { .. } = p2p_msg {
             return;
         } else if let P2pMessage::Pong(timestamp_ms) = p2p_msg {
             last_pong.store(timestamp_ms, std::sync::atomic::Ordering::SeqCst);
@@ -1053,10 +994,47 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                 }
             });
             return;
-        } else if let P2pMessage::RemoteDesktopInput { ref event, .. } = p2p_msg {
-            if let Some(provider) = desktop_provider() {
+        } else if let P2pMessage::RemoteDesktopInput {
+            ref resource_id,
+            ref event,
+        } = p2p_msg
+        {
+            let shared = node_context.my_info.resources.iter().any(|r| {
+                r.id == *resource_id
+                    && r.is_active
+                    && r.resource_type == nodeinnet_p2p::ResourceType::RemoteDesktop
+            });
+            if !shared {
+                handler
+                    .on_log(format!(
+                        "❌ RemoteDesktopInput denied for resource {}: not active or found",
+                        resource_id
+                    ))
+                    .await;
+            } else if let Some(provider) = desktop_provider() {
                 provider.apply_input(event);
             }
+            return;
+        }
+
+        if let P2pMessage::Handshake { .. } = p2p_msg {
+            core::handle_core_message(
+                p2p_msg,
+                handler.clone(),
+                dc,
+                node_context.clone(),
+                target_node_id.clone(),
+                last_pong,
+            )
+            .await;
+            announce_session(
+                &node_context,
+                &handler,
+                &net_tx,
+                &peer_connection,
+                &target_node_id,
+            )
+            .await;
             return;
         }
 
@@ -1071,7 +1049,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             node_context,
             target_node_id,
             last_pong,
-            peer_connection,
         )
         .await;
     } else if let Err(err) =
@@ -1085,6 +1062,38 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             ))
             .await;
     }
+}
+
+async fn announce_session(
+    node_context: &NodeContext,
+    handler: &Arc<dyn crate::AppEventHandler>,
+    net_tx: &tokio_mpsc::Sender<crate::NetCmd>,
+    peer_connection: &Arc<RTCPeerConnection>,
+    target_node_id: &str,
+) {
+    if !node_context.is_authenticated.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(resources) = node_context.peer_resources.lock().await.clone() else {
+        return;
+    };
+    if node_context.session_up.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    handler
+        .on_peer_state_changed(target_node_id.to_string(), crate::P2pPeerState::Connected)
+        .await;
+    let _ = net_tx
+        .send(crate::NetCmd::PeerConnected(
+            target_node_id.to_string(),
+            resources,
+        ))
+        .await;
+    spawn_connection_type_poller(
+        peer_connection.clone(),
+        target_node_id.to_string(),
+        handler.clone(),
+    );
 }
 
 pub struct WebRtcClient {
@@ -1482,6 +1491,20 @@ impl WebRtcClient {
                     );
                 }
 
+                if let nodeinnet_p2p::OutboundP2pPayload::Message(
+                    nodeinnet_p2p::SecuredP2pEnvelope {
+                        message: P2pMessage::FileDownloadRequest { transfer_id, .. },
+                        ..
+                    },
+                ) = &payload
+                {
+                    node_context_for_pipe
+                        .requested_downloads
+                        .lock()
+                        .await
+                        .insert(*transfer_id);
+                }
+
                 let dc_now = {
                     let dc_guard = dc_store_for_pipe.lock().await;
                     dc_guard
@@ -1717,14 +1740,13 @@ impl WebRtcClient {
                     let signature = nodeinnet_p2p::crypto::sign_p2p_handshake(&priv_key, &my_info.id, &target_node_ping, ts)
                         .unwrap_or_else(|_| "INVALID_SIG".to_string());
 
-                    let local_port = p2p_node::local_mesh::LOCAL_TCP_PORT.load(std::sync::atomic::Ordering::Relaxed);
                     let handshake = P2pMessage::Handshake {
                         node_version: my_info.version.clone(),
                         timestamp_ms: ts,
                         signature,
                         requested_resources: None,
                         max_chunk_size: Some(10240),
-                        local_tcp_port: if local_port > 0 { Some(local_port) } else { None },
+                        local_tcp_port: None,
                         from_node_id: Some(my_info.id.clone()),
                     };
                     let envelope = nodeinnet_p2p::SecuredP2pEnvelope { mac: None, message: handshake };
@@ -1869,19 +1891,13 @@ impl WebRtcClient {
                 )
                 .unwrap_or_else(|_| "INVALID_SIG".to_string());
 
-                let local_port =
-                    p2p_node::local_mesh::LOCAL_TCP_PORT.load(std::sync::atomic::Ordering::Relaxed);
                 let handshake = P2pMessage::Handshake {
                     node_version: version.clone(),
                     timestamp_ms: ts,
                     signature,
                     requested_resources: None,
                     max_chunk_size: Some(10240),
-                    local_tcp_port: if local_port > 0 {
-                        Some(local_port)
-                    } else {
-                        None
-                    },
+                    local_tcp_port: None,
                     from_node_id: Some(my_id.clone()),
                 };
                 let envelope = nodeinnet_p2p::SecuredP2pEnvelope {
@@ -2093,18 +2109,6 @@ impl WebRtcClient {
         sdp_mid: Option<String>,
         sdp_mline_index: Option<u16>,
     ) -> Result<(), webrtc::Error> {
-        let stripped = candidate.strip_prefix("candidate:").unwrap_or(&candidate);
-        let parts: Vec<&str> = stripped.split_whitespace().collect();
-        if parts.len() >= 6 {
-            let ip = parts[4].to_string();
-            if ip.parse::<std::net::IpAddr>().is_ok() {
-                let mut ips = self.node_context.discovered_ips.lock().await;
-                if !ips.contains(&ip) {
-                    ips.push(ip);
-                }
-            }
-        }
-
         let init = RTCIceCandidateInit {
             candidate,
             sdp_mid,

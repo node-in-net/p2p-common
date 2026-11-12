@@ -41,8 +41,8 @@ pub enum NetCmd {
     ReloadResources(Vec<nodeinnet_p2p::SharedResource>),
     UpdateName(String),
     ProcessNodesList(Vec<NodeInfo>),
-    MergeNodesList(Vec<NodeInfo>),
     SetLocalDiscovery(bool),
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

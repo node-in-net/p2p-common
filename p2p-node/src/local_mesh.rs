@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
-use nodeinnet_p2p::{NodeInfo, NodeTopologyInfo, P2pMessage};
+use nodeinnet_p2p::{NodeInfo, P2pMessage};
 use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -81,7 +81,6 @@ fn get_noise_private_key(priv_b64: &str) -> Result<[u8; 32], String> {
 pub async fn start_tcp_signaling_server(
     my_id: String,
     private_key_b64: String,
-    peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 ) -> Result<u16, String> {
     let existing_port = LOCAL_TCP_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if existing_port > 0 {
@@ -109,7 +108,6 @@ pub async fn start_tcp_signaling_server(
     let priv_key_noise = get_noise_private_key(&private_key_b64)?;
 
     let my_id_clone = my_id.clone();
-    let peer_store_clone = peer_store.clone();
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -117,7 +115,6 @@ pub async fn start_tcp_signaling_server(
                     let my_id = my_id_clone.clone();
                     let priv_key_noise = priv_key_noise;
                     let private_key_b64 = private_key_b64.clone();
-                    let peer_store = peer_store_clone.clone();
 
                     tokio::spawn(async move {
                         let _ = handle_incoming_tcp_tunnel(
@@ -125,7 +122,6 @@ pub async fn start_tcp_signaling_server(
                             my_id,
                             priv_key_noise,
                             private_key_b64,
-                            peer_store,
                         )
                         .await;
                     });
@@ -144,7 +140,6 @@ async fn handle_incoming_tcp_tunnel(
     my_id: String,
     priv_key_noise: [u8; 32],
     private_key_b64: String,
-    peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 ) -> Result<(), String> {
     let builder = snow::Builder::new("Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap());
     let mut noise = builder
@@ -254,7 +249,6 @@ async fn handle_incoming_tcp_tunnel(
         }
 
         let initiator_id_clone = initiator_id.clone();
-        let peer_store_clone = peer_store.clone();
         tokio::spawn(async move {
             let _ = run_tunnel_loop(
                 stream,
@@ -263,7 +257,6 @@ async fn handle_incoming_tcp_tunnel(
                 initiator_id_clone,
                 my_id,
                 connection_id,
-                peer_store_clone,
             )
             .await;
         });
@@ -279,7 +272,6 @@ pub async fn connect_to_peer_signaling(
     target_node_id: String,
     my_id: String,
     private_key_b64: String,
-    peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 ) -> Result<(), String> {
     let mut stream = match TcpStream::connect(&addr).await {
         Ok(s) => s,
@@ -415,7 +407,6 @@ pub async fn connect_to_peer_signaling(
         }
 
         let target_node_id_clone = target_node_id.clone();
-        let peer_store_clone = peer_store.clone();
         tokio::spawn(async move {
             let _ = run_tunnel_loop(
                 stream,
@@ -424,16 +415,9 @@ pub async fn connect_to_peer_signaling(
                 target_node_id_clone,
                 my_id,
                 connection_id,
-                peer_store_clone,
             )
             .await;
         });
-
-        if let Some(tunnels) = ACTIVE_TCP_TUNNELS.get() {
-            if let Some(session) = tunnels.lock().await.get(&target_node_id) {
-                let _ = session.tx.send(P2pMessage::RequestTopology).await;
-            }
-        }
 
         Ok(())
     } else {
@@ -448,7 +432,6 @@ async fn run_tunnel_loop(
     remote_node_id: String,
     my_id: String,
     connection_id: uuid::Uuid,
-    peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 ) -> Result<(), String> {
     loop {
         tokio::select! {
@@ -474,7 +457,7 @@ async fn run_tunnel_loop(
                         let mut dec_buf = vec![0u8; pkt.len() + 1024];
                         if let Ok(dec_len) = session.read_message(&pkt, &mut dec_buf) {
                             if let Ok(envelope) = serde_json::from_slice::<nodeinnet_p2p::SecuredP2pEnvelope>(&dec_buf[..dec_len]) {
-                                handle_tunnel_message(envelope.message, &remote_node_id, &my_id, peer_store.as_ref()).await;
+                                handle_tunnel_message(envelope.message, &remote_node_id, &my_id).await;
                             }
                         }
                     }
@@ -495,12 +478,7 @@ async fn run_tunnel_loop(
     Ok(())
 }
 
-async fn handle_tunnel_message(
-    msg: P2pMessage,
-    remote_node_id: &str,
-    my_id: &str,
-    peer_store: &dyn nodeinnet_p2p::PeerStore,
-) {
+async fn handle_tunnel_message(msg: P2pMessage, remote_node_id: &str, my_id: &str) {
     match msg {
         P2pMessage::RtcSignal {
             target_node_id,
@@ -532,80 +510,6 @@ async fn handle_tunnel_message(
                         sdp_mline_index,
                     };
                     let _ = session.tx.send(routed_msg).await;
-                }
-            }
-        }
-
-        P2pMessage::RequestTopology => {
-            let tunnels = get_active_tunnels().lock().await;
-            let mut peers = Vec::new();
-            for peer_id in tunnels.keys() {
-                if let Some(pub_key) = nodeinnet_p2p::get_known_public_key(peer_id) {
-                    let last_known_addresses = peer_store
-                        .load()
-                        .get(peer_id)
-                        .map(|p| p.last_known_addresses.clone())
-                        .unwrap_or_default();
-
-                    peers.push(NodeTopologyInfo {
-                        id: peer_id.clone(),
-                        name: peer_id.clone(),
-                        public_key: pub_key,
-                        last_known_addresses,
-                    });
-                }
-            }
-            if let Some(session) = tunnels.get(remote_node_id) {
-                let _ = session
-                    .tx
-                    .send(P2pMessage::ResponseTopology { peers })
-                    .await;
-            }
-        }
-
-        P2pMessage::ResponseTopology { peers } => {
-            for peer in peers {
-                if peer.id == my_id {
-                    continue;
-                }
-
-                if nodeinnet_p2p::get_known_public_key(&peer.id).is_none() {
-                    let node_info = NodeInfo {
-                        id: peer.id.clone(),
-                        name: peer.name.clone(),
-                        os: "unknown".to_string(),
-                        version: "0.1.0".to_string(),
-                        app_type: "desktop".to_string(),
-                        build_type: "debug".to_string(),
-                        public_key: peer.public_key.clone(),
-                        resources: vec![],
-                        is_online: false,
-                        last_used: 0,
-                        is_temporary: false,
-                    };
-                    nodeinnet_p2p::update_known_public_keys(&[node_info]);
-                    peer_store.update(&mut |map: &mut std::collections::HashMap<
-                        String,
-                        nodeinnet_p2p::PeerConfig,
-                    >| {
-                        let entry = map.entry(peer.id.clone()).or_default();
-                        entry.public_key = peer.public_key.clone();
-                        entry.name = peer.name.clone();
-                    });
-                }
-
-                if !peer.last_known_addresses.is_empty() {
-                    peer_store.update(&mut |map: &mut std::collections::HashMap<
-                        String,
-                        nodeinnet_p2p::PeerConfig,
-                    >| {
-                        let entry = map.entry(peer.id.clone()).or_default();
-                        for addr in &peer.last_known_addresses {
-                            if !entry.last_known_addresses.contains(addr) {
-                                entry.last_known_addresses.push(addr.clone());
-                            }
-                        }
-                    });
                 }
             }
         }
