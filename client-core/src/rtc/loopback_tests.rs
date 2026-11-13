@@ -161,6 +161,7 @@ async fn build_client(
         private_key.to_string(),
         None,
         cfg,
+        p2p_node::lan::Link::Account,
     )
     .await
     .expect("WebRtcClient::new failed");

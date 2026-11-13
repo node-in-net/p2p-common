@@ -1,3 +1,4 @@
+pub mod lan;
 pub mod manager;
 pub mod p2p_transfer;
 pub mod peer_orchestrator;
@@ -10,7 +11,7 @@ pub use types::{NetworkMode, PeerBackoff};
 use crate::{AppEventHandler, NetCmd};
 use futures_util::FutureExt;
 use nodeinnet_p2p::rtc::{RtcSignal, RtcSignalEnvelope};
-use nodeinnet_p2p::{NodeInfo, P2pMessage, WsMessage};
+use nodeinnet_p2p::{NodeInfo, WsMessage};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::thread;
@@ -22,95 +23,11 @@ pub async fn route_rtc_signal(
     current_ws_tx: &Option<tokio_mpsc::Sender<WsMessage>>,
     handler: &Arc<dyn AppEventHandler>,
 ) {
-    let mut routed = false;
     let signal_name = match &envelope.signal {
         RtcSignal::Offer { .. } => "Offer",
         RtcSignal::Answer { .. } => "Answer",
         RtcSignal::IceCandidate { .. } => "IceCandidate",
     };
-
-    let _ = handler
-        .on_log(format!(
-            "📡 [route_rtc_signal] Routing RTC {} to node {}",
-            signal_name, envelope.to_node_id
-        ))
-        .await;
-
-    for attempt in 1..=10 {
-        if let Some(tunnels) = p2p_node::local_mesh::ACTIVE_TCP_TUNNELS.get() {
-            let tunnels_map = tunnels.lock().await;
-            if let Some(session) = tunnels_map.get(&envelope.to_node_id) {
-                let p2p_msg = match &envelope.signal {
-                    RtcSignal::Offer { sdp, .. } => P2pMessage::RtcSignal {
-                        target_node_id: envelope.to_node_id.clone(),
-                        signal_type: "offer".to_string(),
-                        sdp_or_candidate: sdp.clone(),
-                        sdp_mid: None,
-                        sdp_mline_index: None,
-                    },
-                    RtcSignal::Answer { sdp } => P2pMessage::RtcSignal {
-                        target_node_id: envelope.to_node_id.clone(),
-                        signal_type: "answer".to_string(),
-                        sdp_or_candidate: sdp.clone(),
-                        sdp_mid: None,
-                        sdp_mline_index: None,
-                    },
-                    RtcSignal::IceCandidate {
-                        candidate,
-                        sdp_mid,
-                        sdp_mline_index,
-                    } => P2pMessage::RtcSignal {
-                        target_node_id: envelope.to_node_id.clone(),
-                        signal_type: "candidate".to_string(),
-                        sdp_or_candidate: candidate.clone(),
-                        sdp_mid: sdp_mid.clone(),
-                        sdp_mline_index: *sdp_mline_index,
-                    },
-                };
-                match session.tx.send(p2p_msg).await {
-                    Ok(_) => {
-                        routed = true;
-                        let _ = handler.on_log(format!("📡 [route_rtc_signal] Successfully routed RTC {} to {} tunnel (attempt {})", signal_name, envelope.to_node_id, attempt)).await;
-                    }
-                    Err(e) => {
-                        let _ = handler
-                            .on_log(format!(
-                                "❌ [route_rtc_signal] Failed to send to tunnel channel for {}: {}",
-                                envelope.to_node_id, e
-                            ))
-                            .await;
-                    }
-                }
-                break;
-            } else {
-                let keys: Vec<String> = tunnels_map.keys().cloned().collect();
-                let _ = handler.on_log(format!("📡 [route_rtc_signal] Attempt {}/10: Peer {} not in ACTIVE_TCP_TUNNELS (available keys: {:?})", attempt, envelope.to_node_id, keys)).await;
-            }
-        } else {
-            let _ = handler
-                .on_log(format!(
-                    "📡 [route_rtc_signal] Attempt {}/10: ACTIVE_TCP_TUNNELS is not initialized",
-                    attempt
-                ))
-                .await;
-        }
-
-        if current_ws_tx.is_some() {
-            let _ = handler
-                .on_log(
-                    "📡 [route_rtc_signal] Cloud WS is connected, breaking tunnel retry loop"
-                        .to_string(),
-                )
-                .await;
-            break;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-
-    if routed {
-        return;
-    }
 
     if let Some(tx) = current_ws_tx {
         let _ = handler
@@ -123,7 +40,7 @@ pub async fn route_rtc_signal(
     } else {
         let _ = handler
             .on_log(format!(
-                "⚠️ Failed to route RtcSignal {} to {}: offline and no active TCP tunnel",
+                "⚠️ Failed to route RtcSignal {} to {}: offline",
                 signal_name, envelope.to_node_id
             ))
             .await;
@@ -137,7 +54,7 @@ pub fn start_network_thread(
     my_info: NodeInfo,
     private_key: String,
     peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
-    enable_local_discovery: bool,
+    lan: Option<p2p_node::lan::LanConfig>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let rt = match Runtime::new() {
@@ -159,7 +76,7 @@ pub fn start_network_thread(
             my_info,
             private_key,
             peer_store,
-            enable_local_discovery,
+            lan,
         ));
         rt.shutdown_timeout(std::time::Duration::from_secs(1));
     })
@@ -172,7 +89,7 @@ pub async fn run_network_manager(
     my_info: NodeInfo,
     private_key: String,
     peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
-    enable_local_discovery: bool,
+    lan: Option<p2p_node::lan::LanConfig>,
 ) {
     let mut manager = NetworkManager::new(
         my_info,
@@ -224,25 +141,13 @@ pub async fn run_network_manager(
         let _ = manager.handler.on_update_nodes(all_nodes).await;
     }
 
-    if enable_local_discovery {
-        manager.start_local_discovery();
-    }
-
-    let (signal_tx, mut signal_rx) = tokio_mpsc::channel(100);
-    let mut _unused_signal_tx = None;
-    if let Err(returned) = p2p_node::local_mesh::SIGNAL_TX.set(signal_tx) {
-        let _ = handler
-            .on_log(
-                "⚠️ [Network] local-mesh signal channel was already claimed by an earlier \
-                 network manager in this process; this one will not receive local-mesh signals"
-                    .to_string(),
-            )
-            .await;
-        _unused_signal_tx = Some(returned);
-    }
+    let (lan_tx, mut lan_rx) = tokio_mpsc::channel(256);
+    let mut lan_open = match lan {
+        Some(config) => manager.start_lan(config, lan_tx).await,
+        None => false,
+    };
 
     let mut reconnect_interval = tokio::time::interval(std::time::Duration::from_secs(5));
-    let mut local_mesh_open = true;
     let mut later = VecDeque::new();
 
     loop {
@@ -259,21 +164,24 @@ pub async fn run_network_manager(
                         Some(cmd) => {
                             until_shutdown(manager.handle_net_cmd(cmd), &mut net_rx, &mut later).await
                         }
-                        None => break,
+                        None => {
+                            manager.shutdown().await;
+                            break;
+                        }
                     }
                 }
-                signal_opt = signal_rx.recv(), if local_mesh_open => {
+                signal_opt = lan_rx.recv(), if lan_open => {
                     match signal_opt {
                         Some(signal) => {
                             until_shutdown(
-                                manager.handle_local_mesh_signal(signal),
+                                manager.handle_lan_signal(signal),
                                 &mut net_rx,
                                 &mut later,
                             )
                             .await
                         }
                         None => {
-                            local_mesh_open = false;
+                            lan_open = false;
                             false
                         }
                     }
@@ -313,7 +221,7 @@ pub fn spawn_network_task(
     my_info: NodeInfo,
     private_key: String,
     peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
-    enable_local_discovery: bool,
+    lan: Option<p2p_node::lan::LanConfig>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(run_network_manager(
         net_rx,
@@ -322,14 +230,14 @@ pub fn spawn_network_task(
         my_info,
         private_key,
         peer_store,
-        enable_local_discovery,
+        lan,
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodeinnet_p2p::{MemoryPeerStore, PeerConfig, PeerStore};
+    use nodeinnet_p2p::{MemoryPeerStore, P2pMessage, PeerConfig, PeerStore};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
@@ -400,7 +308,7 @@ mod tests {
             node("shutdown-thread"),
             String::new(),
             Arc::new(MemoryPeerStore::default()),
-            false,
+            None,
         );
         net_tx
             .blocking_send(NetCmd::Shutdown)
@@ -425,7 +333,7 @@ mod tests {
             node("shutdown-connect"),
             String::new(),
             Arc::new(MemoryPeerStore::default()),
-            false,
+            None,
         );
         net_tx
             .blocking_send(NetCmd::Connect(url, node("shutdown-connect"), None))
@@ -477,7 +385,7 @@ mod tests {
             node("two-connects"),
             String::new(),
             Arc::new(MemoryPeerStore::default()),
-            false,
+            None,
         );
         for _ in 0..2 {
             net_tx
@@ -517,7 +425,7 @@ mod tests {
             node("shutdown-task"),
             String::new(),
             Arc::new(MemoryPeerStore::default()),
-            false,
+            None,
         );
         net_tx
             .send(NetCmd::Shutdown)
@@ -545,6 +453,7 @@ mod tests {
             String::new(),
             None,
             store.clone(),
+            p2p_node::lan::Link::Account,
         )
         .await
         .expect("a peer connection");

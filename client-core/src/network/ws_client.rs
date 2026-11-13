@@ -3,12 +3,13 @@ use super::types::{NetworkMode, PeerBackoff};
 use crate::NetCmd;
 use futures_util::{SinkExt, StreamExt};
 use nodeinnet_p2p::{NodeInfo, WsMessage};
+use p2p_node::lan::Link;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 impl NetworkManager {
-    pub async fn transition_to_local_mesh_fallback(&mut self, _is_disconnection: bool) {
+    pub async fn transition_to_offline(&mut self, _is_disconnection: bool) {
         self.current_ws_tx = None;
         self.focused_peer = None;
         for task in self.ws_tasks.drain(..) {
@@ -74,7 +75,10 @@ impl NetworkManager {
                                     match ws_msg {
                                         WsMessage::InboundRtcSignal(inbound) => {
                                             let _ = net_tx_read
-                                                .send(NetCmd::HandleInboundSignal(inbound))
+                                                .send(NetCmd::HandleInboundSignal(
+                                                    inbound,
+                                                    Link::Account,
+                                                ))
                                                 .await;
                                             continue;
                                         }
@@ -122,13 +126,18 @@ impl NetworkManager {
                             _ => unreachable!(),
                         };
 
-                        self.transition_to_local_mesh_fallback(false).await;
+                        self.transition_to_offline(false).await;
                     }
                 }
             }
             NetCmd::ApplyTurnCredentials(turn) => {
                 self.current_turn_credentials = turn;
-                let peers: Vec<String> = self.active_peers.keys().cloned().collect();
+                let peers: Vec<String> = self
+                    .active_peers
+                    .iter()
+                    .filter(|(_, peer)| peer.link == Link::Account)
+                    .map(|(id, _)| id.clone())
+                    .collect();
                 self.handler
                     .on_log(format!(
                         "🔄 [TURN] Relay credentials replaced; redialling {} peer(s)",
@@ -140,7 +149,7 @@ impl NetworkManager {
                 }
             }
             NetCmd::Disconnect => {
-                self.transition_to_local_mesh_fallback(true).await;
+                self.transition_to_offline(true).await;
             }
             NetCmd::ProcessNodesList(nodes) => {
                 self.handler
@@ -198,7 +207,12 @@ impl NetworkManager {
                     .collect();
                 target_nodes.sort_by(|a, b| a.id.cmp(&b.id));
 
-                let active_ids: Vec<String> = self.active_peers.keys().cloned().collect();
+                let active_ids: Vec<String> = self
+                    .active_peers
+                    .iter()
+                    .filter(|(_, peer)| peer.link == Link::Account)
+                    .map(|(id, _)| id.clone())
+                    .collect();
                 for active_id in active_ids {
                     if !nodes.iter().any(|n| n.id == active_id) {
                         if let Some(peer) = self.active_peers.remove(&active_id) {
@@ -245,7 +259,10 @@ impl NetworkManager {
                             serde_json::to_string(&old_info.resources),
                             serde_json::to_string(&node.resources),
                         ) && old_res != new_res
-                            && self.active_peers.contains_key(&node.id)
+                            && self
+                                .active_peers
+                                .get(&node.id)
+                                .is_some_and(|peer| peer.link == Link::Account)
                         {
                             if let Some(peer) = self.active_peers.remove(&node.id) {
                                 let pc = peer.peer_connection.clone();
@@ -289,28 +306,11 @@ impl NetworkManager {
                     self.last_known_nodes.insert(node.id.clone(), node.clone());
                 }
 
-                self.last_known_nodes.retain(|id, node| {
-                    let in_server_list = nodes.iter().any(|n| n.id == *id);
-                    if in_server_list {
-                        return true;
-                    }
-                    let locally_connected = {
-                        if let Some(tunnels) = p2p_node::local_mesh::ACTIVE_TCP_TUNNELS.get() {
-                            if let Ok(guard) = tunnels.try_lock() {
-                                guard.contains_key(id)
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    };
-                    if locally_connected {
-                        node.is_online = true;
-                        return true;
-                    }
-                    false
-                });
+                self.last_known_nodes
+                    .retain(|id, _| nodes.iter().any(|n| n.id == *id));
+                if let Some(lan) = &self.lan {
+                    lan.set_account_nodes(&nodes);
+                }
 
                 let all_nodes: Vec<NodeInfo> = self.last_known_nodes.values().cloned().collect();
                 let _ = self.handler.on_update_nodes(all_nodes).await;
@@ -323,16 +323,25 @@ impl NetworkManager {
                         .await;
                 }
 
-                for (_id, peer) in self.active_peers.drain() {
+                for (id, peer) in self.active_peers.drain() {
+                    if peer.link != Link::Account
+                        && let Some(lan) = &self.lan
+                    {
+                        lan.session(&id, None);
+                    }
                     let pc = peer.peer_connection.clone();
                     drop(peer);
                     tokio::spawn(async move {
                         let _ = pc.close().await;
                     });
                 }
+                self.lan_dials.clear();
                 self.focused_peer = None;
             }
             NetCmd::UpdateName(name) => {
+                if let Some(lan) = &self.lan {
+                    lan.set_name(&name);
+                }
                 self.my_info.name = name;
                 if let Some(url) = self.current_ws_url.clone() {
                     let _ = self

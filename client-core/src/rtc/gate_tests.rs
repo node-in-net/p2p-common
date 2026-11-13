@@ -1,11 +1,13 @@
-use super::{IncomingP2pContext, handle_incoming_p2p_message};
+use super::{IncomingP2pContext, handle_incoming_p2p_message, signal_cmd};
 use crate::{AppEventHandler, NetCmd, P2pFailure, P2pPeerState};
 use nodeinnet_p2p::crypto::{generate_ed25519_keypair, generate_session_token};
+use nodeinnet_p2p::rtc::RtcSignal;
 use nodeinnet_p2p::{
     MemoryPeerStore, NodeInfo, OutboundP2pPayload, P2pMessage, PeerStore, ResourceType,
-    SecuredP2pEnvelope, SharedResource,
+    SecuredP2pEnvelope, SharedResource, WsMessage,
 };
 use p2p_node::NodeContext;
+use p2p_node::lan::Link;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{Mutex, mpsc};
@@ -159,6 +161,10 @@ impl Session {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
+        self.handshake_at(signing_key, ts)
+    }
+
+    fn handshake_at(&self, signing_key: &str, ts: u64) -> P2pMessage {
         P2pMessage::Handshake {
             node_version: "0.0.0".to_string(),
             timestamp_ms: ts,
@@ -221,6 +227,23 @@ impl Session {
         announced
     }
 
+    fn lan_session_up(&mut self) -> Vec<Vec<SharedResource>> {
+        let mut announced = Vec::new();
+        while let Ok(cmd) = self.net_rx.try_recv() {
+            match cmd {
+                NetCmd::LanSessionUp(_, connection_id, resources) => {
+                    assert_eq!(connection_id, self.ctx.connection_id);
+                    announced.push(resources);
+                }
+                NetCmd::PeerConnected(..) => {
+                    panic!("a LAN session was announced as an account one")
+                }
+                _ => {}
+            }
+        }
+        announced
+    }
+
     async fn connected_states(&self) -> usize {
         self.seen
             .states
@@ -230,6 +253,15 @@ impl Session {
             .filter(|state| **state == P2pPeerState::Connected)
             .count()
     }
+}
+
+async fn open_lan(my_resources: Vec<SharedResource>) -> (Session, String) {
+    let mut s = open(my_resources).await;
+    let (private, public) = generate_ed25519_keypair();
+    let key = p2p_node::lan::id::key_bytes(&public).expect("a 32-byte key");
+    s.ctx.node_context.link = Link::Lan { key };
+    let account_key = std::mem::replace(&mut s.peer_key, private);
+    (s, account_key)
 }
 
 fn token_of(sent: &[Vec<SharedResource>], id: &str) -> String {
@@ -459,6 +491,81 @@ async fn a_peers_sync_before_the_handshake_is_dropped_without_a_failure() {
     assert_eq!(nodeinnet_p2p::get_known_public_key(&stranger), None);
     assert!(s.seen.failures.lock().await.is_empty());
     assert!(s.seen.states.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_lan_handshake_needs_the_pinned_key_and_no_clock() {
+    let (mut s, account_key) =
+        open_lan(vec![resource("fs-mine", ResourceType::Filesystem, None)]).await;
+
+    s.deliver(None, s.handshake(&account_key)).await;
+    assert!(!s.authenticated(), "a LAN session used the account key");
+    assert!(matches!(
+        s.seen.failures.lock().await.as_slice(),
+        [P2pFailure::BadSignature(_)]
+    ));
+
+    s.deliver(None, s.handshake_at(&s.peer_key, 1)).await;
+    assert!(s.authenticated(), "a LAN session applied the clock rule");
+    assert_eq!(s.sent_handshake_responses().len(), 1);
+}
+
+#[tokio::test]
+async fn a_lan_handshake_response_keeps_only_the_senders_ids() {
+    let (mut s, _) = open_lan(vec![resource("fs-mine", ResourceType::Filesystem, None)]).await;
+    let peer = s.peer_id.clone();
+    let stranger = "f".repeat(32);
+    let offered = [
+        (format!("fs-{peer}"), ResourceType::Filesystem),
+        (format!("terminal-{peer}"), ResourceType::Terminal),
+        (format!("desktop-{peer}"), ResourceType::RemoteDesktop),
+        (format!("fs-{stranger}"), ResourceType::Filesystem),
+        ("b-scratch".to_string(), ResourceType::Filesystem),
+        (format!("sync-{peer}"), ResourceType::SyncFolder),
+        ("fs-mine".to_string(), ResourceType::Filesystem),
+    ];
+    s.deliver(
+        None,
+        P2pMessage::HandshakeResponse {
+            resources: offered
+                .iter()
+                .map(|(id, kind)| resource(id, kind.clone(), Some(generate_session_token())))
+                .collect(),
+        },
+    )
+    .await;
+    s.verified_handshake().await;
+
+    let announced = s.lan_session_up();
+    assert_eq!(announced.len(), 1);
+    let kept: Vec<&str> = announced[0].iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(kept, [format!("fs-{peer}"), format!("terminal-{peer}")]);
+    assert!(s.key(&format!("fs-{peer}")).await.is_some());
+    for dropped in [
+        format!("desktop-{peer}"),
+        "b-scratch".to_string(),
+        format!("fs-{stranger}"),
+        format!("sync-{peer}"),
+    ] {
+        assert_eq!(s.key(&dropped).await, None, "{dropped}");
+    }
+}
+
+#[test]
+fn a_lan_session_signals_through_its_tunnel() {
+    let candidate = || RtcSignal::IceCandidate {
+        candidate: "candidate:1 1 udp 1 192.168.1.2 5000 typ host".to_string(),
+        sdp_mid: None,
+        sdp_mline_index: None,
+    };
+    assert!(matches!(
+        signal_cmd(Link::Lan { key: [7; 32] }, "peer".to_string(), candidate()),
+        NetCmd::SendLanSignal(to, RtcSignal::IceCandidate { .. }) if to == "peer"
+    ));
+    assert!(matches!(
+        signal_cmd(Link::Account, "peer".to_string(), candidate()),
+        NetCmd::Send(WsMessage::RtcSignal(envelope)) if envelope.to_node_id == "peer"
+    ));
 }
 
 #[cfg(feature = "feature-rdesk")]

@@ -13,6 +13,7 @@ use nodeinnet_p2p::P2pMessage;
 use nodeinnet_p2p::rtc::{RtcSignal, RtcSignalEnvelope};
 use nodeinnet_p2p::{NodeInfo, WsMessage};
 use p2p_node::NodeContext;
+use p2p_node::lan::Link;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "feature-rdesk")]
@@ -280,9 +281,6 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
         connection_id,
     } = ctx;
 
-    #[cfg(not(feature = "feature-rdesk"))]
-    let _ = connection_id;
-
     handler
         .on_log(format!(
             "📥 [INCOMING BSON] from {}: size {} bytes",
@@ -310,6 +308,7 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
         }
 
         if let P2pMessage::HandshakeResponse { ref resources } = p2p_msg {
+            let over_lan = node_context.link != Link::Account;
             let theirs: Vec<nodeinnet_p2p::SharedResource> = resources
                 .iter()
                 .filter(|res| {
@@ -318,6 +317,9 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                         .resources
                         .iter()
                         .any(|mine| mine.id == res.id)
+                })
+                .filter(|res| {
+                    !over_lan || crate::network::lan::served_over_lan(res, &target_node_id)
                 })
                 .cloned()
                 .collect();
@@ -351,6 +353,7 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                 &net_tx,
                 &peer_connection,
                 &target_node_id,
+                connection_id,
             )
             .await;
             return;
@@ -1033,6 +1036,7 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
                 &net_tx,
                 &peer_connection,
                 &target_node_id,
+                connection_id,
             )
             .await;
             return;
@@ -1070,6 +1074,7 @@ async fn announce_session(
     net_tx: &tokio_mpsc::Sender<crate::NetCmd>,
     peer_connection: &Arc<RTCPeerConnection>,
     target_node_id: &str,
+    connection_id: uuid::Uuid,
 ) {
     if !node_context.is_authenticated.load(Ordering::SeqCst) {
         return;
@@ -1083,12 +1088,13 @@ async fn announce_session(
     handler
         .on_peer_state_changed(target_node_id.to_string(), crate::P2pPeerState::Connected)
         .await;
-    let _ = net_tx
-        .send(crate::NetCmd::PeerConnected(
-            target_node_id.to_string(),
-            resources,
-        ))
-        .await;
+    let announced = match node_context.link {
+        Link::Account => crate::NetCmd::PeerConnected(target_node_id.to_string(), resources),
+        Link::Lan { .. } => {
+            crate::NetCmd::LanSessionUp(target_node_id.to_string(), connection_id, resources)
+        }
+    };
+    let _ = net_tx.send(announced).await;
     spawn_connection_type_poller(
         peer_connection.clone(),
         target_node_id.to_string(),
@@ -1096,10 +1102,30 @@ async fn announce_session(
     );
 }
 
+fn signal_cmd(link: Link, to_node_id: String, signal: RtcSignal) -> NetCmd {
+    match link {
+        Link::Account => NetCmd::Send(WsMessage::RtcSignal(RtcSignalEnvelope {
+            to_node_id,
+            signal,
+        })),
+        Link::Lan { .. } => NetCmd::SendLanSignal(to_node_id, signal),
+    }
+}
+
+fn lan_setting_engine() -> webrtc::api::setting_engine::SettingEngine {
+    let mut engine = webrtc::api::setting_engine::SettingEngine::default();
+    engine.set_ip_filter(Box::new(p2p_node::lan::net::is_private));
+    engine.set_interface_filter(Box::new(|name: &str| !p2p_node::lan::net::is_virtual(name)));
+    engine.set_network_types(vec![webrtc::ice::network_type::NetworkType::Udp4]);
+    engine.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
+    engine
+}
+
 pub struct WebRtcClient {
     pub peer_connection: Arc<RTCPeerConnection>,
     pub target_node_id: String,
     pub connection_id: uuid::Uuid,
+    pub link: Link,
     my_info: NodeInfo,
     handler: std::sync::Arc<dyn crate::AppEventHandler>,
     pub data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
@@ -1111,6 +1137,7 @@ pub struct WebRtcClient {
 }
 
 impl WebRtcClient {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         handler: std::sync::Arc<dyn crate::AppEventHandler>,
         net_tx: tokio_mpsc::Sender<NetCmd>,
@@ -1119,6 +1146,7 @@ impl WebRtcClient {
         private_key: String,
         turn_credentials: Option<nodeinnet_p2p::rtc::TurnCredentials>,
         peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
+        link: Link,
     ) -> Result<Self, webrtc::Error> {
         let connection_id = uuid::Uuid::new_v4();
         let pending_messages = Arc::new(Mutex::new(Vec::new()));
@@ -1135,7 +1163,7 @@ impl WebRtcClient {
             }
         });
 
-        let node_context = NodeContext::new(
+        let mut node_context = NodeContext::new(
             out_tx,
             log_tx,
             local_evt_tx,
@@ -1143,6 +1171,7 @@ impl WebRtcClient {
             target_node_id.clone(),
             peer_store,
         );
+        node_context.link = link;
 
         let handler_logs = handler.clone();
         tokio::spawn(async move {
@@ -1154,12 +1183,20 @@ impl WebRtcClient {
         let mut m = webrtc::api::media_engine::MediaEngine::default();
         m.register_default_codecs()
             .expect("Failed to register default codecs");
-        let api = APIBuilder::new().with_media_engine(m).build();
+        let api = match link {
+            Link::Account => APIBuilder::new().with_media_engine(m).build(),
+            Link::Lan { .. } => APIBuilder::new()
+                .with_media_engine(m)
+                .with_setting_engine(lan_setting_engine())
+                .build(),
+        };
 
         let mut ice_servers = Vec::new();
         let mut turn_msg = String::new();
 
-        if let Some(turn) = &turn_credentials {
+        if link != Link::Account {
+            turn_msg.push_str("none (local network)");
+        } else if let Some(turn) = &turn_credentials {
             turn_msg.push_str(&format!("turn:{}", turn.uris.join(", ")));
             ice_servers.push(RTCIceServer {
                 urls: turn.uris.clone(),
@@ -1193,11 +1230,16 @@ impl WebRtcClient {
         #[cfg(feature = "feature-rdesk")]
         let handler_track = handler.clone();
         #[cfg(feature = "feature-rdesk")]
+        let over_lan = link != Link::Account;
+        #[cfg(feature = "feature-rdesk")]
         peer_connection.on_track(Box::new(move |track, _receiver| {
             let track_clone = track.clone();
             let pc_weak = pc_track.clone();
             let h = handler_track.clone();
             Box::pin(async move {
+                if over_lan {
+                    return;
+                }
                 if let Some(t) = track_clone {
                     let _ = h.on_log("📹 WebRTC Media track detected! Initializing H.264 packet depacketizer & decoder...".to_string()).await;
                     let mut decoder = match Decoder::new() {
@@ -1384,11 +1426,8 @@ impl WebRtcClient {
                                 Ok(offer) => {
                                     if pc_delay.set_local_description(offer).await.is_ok()
                                         && let Some(local) = pc_delay.local_description().await {
-                                            let envelope = RtcSignalEnvelope {
-                                                to_node_id: target_delay.clone(),
-                                                signal: RtcSignal::Offer { sdp: local.sdp, ice_restart: true },
-                                            };
-                                            let _ = net_tx_delay.send(crate::NetCmd::Send(WsMessage::RtcSignal(envelope))).await;
+                                            let offer = RtcSignal::Offer { sdp: local.sdp, ice_restart: true };
+                                            let _ = net_tx_delay.send(signal_cmd(link, target_delay.clone(), offer)).await;
                                         }
                                     let _ = wait_until_signaling_stable(
                                 &pc_delay,
@@ -1607,17 +1646,12 @@ impl WebRtcClient {
                 if let Some(candidate) = c
                     && let Ok(json) = candidate.to_json()
                 {
-                    let envelope = RtcSignalEnvelope {
-                        to_node_id: target,
-                        signal: RtcSignal::IceCandidate {
-                            candidate: json.candidate,
-                            sdp_mid: json.sdp_mid,
-                            sdp_mline_index: json.sdp_mline_index,
-                        },
+                    let signal = RtcSignal::IceCandidate {
+                        candidate: json.candidate,
+                        sdp_mid: json.sdp_mid,
+                        sdp_mline_index: json.sdp_mline_index,
                     };
-                    let _ = net_tx
-                        .send(NetCmd::Send(WsMessage::RtcSignal(envelope)))
-                        .await;
+                    let _ = net_tx.send(signal_cmd(link, target, signal)).await;
                 }
             })
         }));
@@ -1822,6 +1856,7 @@ impl WebRtcClient {
             peer_connection,
             target_node_id,
             connection_id,
+            link,
             my_info,
             handler,
             data_channel: data_channel_store,
@@ -2128,20 +2163,7 @@ impl WebRtcClient {
     }
 
     pub async fn get_connection_type(&self) -> String {
-        let mut conn_type = get_connection_type_from_pc(&self.peer_connection).await;
-        if conn_type == "P2P" {
-            let has_tunnel = {
-                if let Some(tunnels) = p2p_node::local_mesh::ACTIVE_TCP_TUNNELS.get() {
-                    tunnels.lock().await.contains_key(&self.target_node_id)
-                } else {
-                    false
-                }
-            };
-            if has_tunnel {
-                conn_type = "Local Mesh".to_string();
-            }
-        }
-        conn_type
+        get_connection_type_from_pc(&self.peer_connection).await
     }
 }
 
@@ -2198,19 +2220,7 @@ pub fn spawn_connection_type_poller(
             {
                 break;
             }
-            let mut conn_type = get_connection_type_from_pc(&peer_connection).await;
-            if conn_type == "P2P" {
-                let has_tunnel = {
-                    if let Some(tunnels) = p2p_node::local_mesh::ACTIVE_TCP_TUNNELS.get() {
-                        tunnels.lock().await.contains_key(&target_node_id)
-                    } else {
-                        false
-                    }
-                };
-                if has_tunnel {
-                    conn_type = "Local Mesh".to_string();
-                }
-            }
+            let conn_type = get_connection_type_from_pc(&peer_connection).await;
             if conn_type != "checking" && conn_type != last_type {
                 last_type = conn_type.clone();
                 let stats = peer_connection.get_stats().await;

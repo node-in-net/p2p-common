@@ -3,10 +3,11 @@ use super::types::{NetworkMode, PeerBackoff, get_cooldown_duration};
 use crate::NetCmd;
 use nodeinnet_p2p::NodeInfo;
 use nodeinnet_p2p::rtc::{RtcSignal, RtcSignalEnvelope};
-use p2p_node::local_mesh::LocalMeshSignal;
+use p2p_node::lan::Link;
 
 impl NetworkManager {
     pub async fn handle_tick(&mut self) {
+        self.reap_stuck_lan_sessions().await;
         match self.mode {
             NetworkMode::WebSocketConnected => {
                 let online_targets: Vec<String> = self
@@ -41,6 +42,58 @@ impl NetworkManager {
 
     pub async fn handle_peer_cmd(&mut self, cmd: NetCmd) {
         match cmd {
+            NetCmd::DisconnectPeer(node_id)
+                if self
+                    .active_peers
+                    .get(&node_id)
+                    .is_some_and(|peer| peer.link != Link::Account) =>
+            {
+                self.end_lan_session(&node_id).await;
+            }
+            NetCmd::DisconnectPeerSession(node_id, conn_id)
+                if self.active_peers.get(&node_id).is_some_and(|peer| {
+                    peer.link != Link::Account && peer.connection_id == conn_id
+                }) =>
+            {
+                self.end_lan_session(&node_id).await;
+            }
+            NetCmd::HandleInboundSignal(inbound, link)
+                if self
+                    .active_peers
+                    .get(&inbound.from_node_id)
+                    .is_some_and(|peer| peer.link != link) =>
+            {
+                self.handler
+                    .on_log(format!(
+                        "🚫 [Inbound] Signal from {} ignored: its session runs over the other link",
+                        inbound.from_node_id
+                    ))
+                    .await;
+            }
+            NetCmd::HandleInboundSignal(inbound, Link::Account)
+                if self.lan_knows(&inbound.from_node_id) =>
+            {
+                self.handler
+                    .on_log(format!(
+                        "🚫 [Inbound] Account signal from {} ignored: it is a local-network device",
+                        inbound.from_node_id
+                    ))
+                    .await;
+            }
+            NetCmd::AutoConnect(node_id) | NetCmd::Call(node_id)
+                if self.lan_knows(&node_id)
+                    || self
+                        .active_peers
+                        .get(&node_id)
+                        .is_some_and(|peer| peer.link != Link::Account) =>
+            {
+                self.handler
+                    .on_log(format!(
+                        "⏭️ {} is a local-network device; not dialling it through the account",
+                        node_id
+                    ))
+                    .await;
+            }
             NetCmd::DisconnectPeer(node_id) => {
                 if let Some(peer) = self.active_peers.remove(&node_id) {
                     self.handler
@@ -199,7 +252,7 @@ impl NetworkManager {
                     ))
                     .await;
             }
-            NetCmd::HandleInboundSignal(inbound) => match inbound.signal {
+            NetCmd::HandleInboundSignal(inbound, link) => match inbound.signal {
                 RtcSignal::Offer { sdp, ice_restart } => {
                     self.handler
                         .on_log(format!(
@@ -225,16 +278,9 @@ impl NetworkManager {
                                 .await;
                         match existing.accept_offer_and_answer(sdp).await {
                             Ok(answer_sdp) => {
-                                let envelope = RtcSignalEnvelope {
-                                    to_node_id: inbound.from_node_id.clone(),
-                                    signal: RtcSignal::Answer { sdp: answer_sdp },
-                                };
-                                let current_ws = self.current_ws_tx.clone();
-                                let handler_route = self.handler.clone();
-                                tokio::spawn(async move {
-                                    super::route_rtc_signal(envelope, &current_ws, &handler_route)
-                                        .await;
-                                });
+                                let answer = RtcSignal::Answer { sdp: answer_sdp };
+                                self.send_signal(link, inbound.from_node_id.clone(), answer)
+                                    .await;
                             }
                             Err(e) => {
                                 self.handler
@@ -245,6 +291,25 @@ impl NetworkManager {
                                         .await;
                             }
                         }
+                        return;
+                    }
+
+                    if link != Link::Account && !self.lan_admits_session(&inbound.from_node_id) {
+                        self.handler
+                            .on_log(format!(
+                                "🚫 [LAN] Offer from {} refused: not trusted here, or hidden",
+                                inbound.from_node_id
+                            ))
+                            .await;
+                        return;
+                    }
+                    if link != Link::Account && self.lan_offer_stands(&inbound.from_node_id) {
+                        self.handler
+                            .on_log(format!(
+                                "⏭️ [LAN] Offers crossed with {}; ours stands",
+                                inbound.from_node_id
+                            ))
+                            .await;
                         return;
                     }
 
@@ -290,6 +355,12 @@ impl NetworkManager {
                             .await;
 
                         if let Some(old_client) = self.active_peers.remove(&inbound.from_node_id) {
+                            if old_client.link != Link::Account {
+                                self.lan_dials.remove(&inbound.from_node_id);
+                                if let Some(lan) = &self.lan {
+                                    lan.session(&inbound.from_node_id, None);
+                                }
+                            }
                             self.handler
                                 .on_log(format!(
                                     "🧹 [Inbound] Replacing existing WebRTC client for {}",
@@ -306,30 +377,20 @@ impl NetworkManager {
                         match crate::rtc::WebRtcClient::new(
                             self.handler.clone(),
                             self.net_tx_bg.clone(),
-                            self.my_info.clone(),
+                            self.my_info_for(&inbound.from_node_id, &link),
                             inbound.from_node_id.clone(),
                             self.private_key.clone(),
                             self.current_turn_credentials.clone(),
                             self.peer_store.clone(),
+                            link,
                         )
                         .await
                         {
                             Ok(rtc_client) => match rtc_client.accept_offer_and_answer(sdp).await {
                                 Ok(answer_sdp) => {
-                                    let envelope = RtcSignalEnvelope {
-                                        to_node_id: inbound.from_node_id.clone(),
-                                        signal: RtcSignal::Answer { sdp: answer_sdp },
-                                    };
-                                    let current_ws = self.current_ws_tx.clone();
-                                    let handler_route = self.handler.clone();
-                                    tokio::spawn(async move {
-                                        super::route_rtc_signal(
-                                            envelope,
-                                            &current_ws,
-                                            &handler_route,
-                                        )
+                                    let answer = RtcSignal::Answer { sdp: answer_sdp };
+                                    self.send_signal(link, inbound.from_node_id.clone(), answer)
                                         .await;
-                                    });
                                     self.active_peers
                                         .insert(inbound.from_node_id.clone(), rtc_client);
                                 }
@@ -508,11 +569,12 @@ impl NetworkManager {
                 match crate::rtc::WebRtcClient::new(
                     self.handler.clone(),
                     self.net_tx_bg.clone(),
-                    self.my_info.clone(),
+                    self.my_info_for(&node_id, &Link::Account),
                     node_id.clone(),
                     self.private_key.clone(),
                     self.current_turn_credentials.clone(),
                     self.peer_store.clone(),
+                    Link::Account,
                 )
                 .await
                 {
@@ -678,11 +740,12 @@ impl NetworkManager {
                 match crate::rtc::WebRtcClient::new(
                     self.handler.clone(),
                     self.net_tx_bg.clone(),
-                    self.my_info.clone(),
+                    self.my_info_for(&node_id, &Link::Account),
                     node_id.clone(),
                     self.private_key.clone(),
                     self.current_turn_credentials.clone(),
                     self.peer_store.clone(),
+                    Link::Account,
                 )
                 .await
                 {
@@ -723,155 +786,6 @@ impl NetworkManager {
                 }
             }
             _ => {}
-        }
-    }
-
-    pub async fn handle_peer_signal(&mut self, signal: LocalMeshSignal) {
-        if !self.local_discovery_enabled {
-            return;
-        }
-        match signal {
-            LocalMeshSignal::InboundRtcSignal {
-                from_node_id,
-                signal_type,
-                sdp_or_candidate,
-                sdp_mid,
-                sdp_mline_index,
-            } => {
-                let rtc_sig = match signal_type.as_str() {
-                    "offer" => nodeinnet_p2p::rtc::RtcSignal::Offer {
-                        sdp: sdp_or_candidate,
-                        ice_restart: false,
-                    },
-                    "answer" => nodeinnet_p2p::rtc::RtcSignal::Answer {
-                        sdp: sdp_or_candidate,
-                    },
-                    "candidate" => nodeinnet_p2p::rtc::RtcSignal::IceCandidate {
-                        candidate: sdp_or_candidate,
-                        sdp_mid,
-                        sdp_mline_index,
-                    },
-                    _ => return,
-                };
-                let inbound = nodeinnet_p2p::rtc::InboundRtcSignal {
-                    from_node_id,
-                    signal: rtc_sig,
-                };
-                let _ = self
-                    .net_tx_bg
-                    .send(NetCmd::HandleInboundSignal(inbound))
-                    .await;
-            }
-            LocalMeshSignal::PeerDiscovered(node) => {
-                let already_connected = if let Some(existing) = self.last_known_nodes.get(&node.id)
-                {
-                    existing.is_online
-                } else {
-                    false
-                };
-                self.last_known_nodes.insert(node.id.clone(), node.clone());
-                let all_nodes: Vec<NodeInfo> = self.last_known_nodes.values().cloned().collect();
-                let _ = self.handler.on_update_nodes(all_nodes).await;
-
-                if self.current_ws_tx.is_none() {
-                    self.handler
-                        .on_ws_state_changed(crate::WsState::LocalMesh)
-                        .await;
-                }
-
-                if !already_connected && node.app_type != "web" && node.id > self.my_info.id {
-                    let tx = self.net_tx_bg.clone();
-                    let target_id = node.id.clone();
-                    tokio::spawn(async move {
-                        let _ = tx.send(NetCmd::AutoConnect(target_id)).await;
-                    });
-                }
-            }
-            LocalMeshSignal::TunnelEstablished(peer_id) => {
-                self.handler
-                    .on_log(format!(
-                        "🟢 [Mesh] Direct signaling tunnel established with peer {}",
-                        peer_id
-                    ))
-                    .await;
-
-                if self.current_ws_tx.is_none() {
-                    self.handler
-                        .on_ws_state_changed(crate::WsState::LocalMesh)
-                        .await;
-                }
-
-                let is_connected = if let Some(old_client) = self.active_peers.get(&peer_id) {
-                    old_client.peer_connection.connection_state() == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Connected
-                } else {
-                    false
-                };
-
-                if is_connected {
-                    self.handler.on_log(format!("⏭️ [Mesh] Preserving active WebRTC client for {} because it is already Connected", peer_id)).await;
-                } else {
-                    if let Some(old_client) = self.active_peers.remove(&peer_id) {
-                        self.handler
-                            .on_log(format!(
-                                "🧹 [Mesh] Dropping stale WebRTC client for {} due to new tunnel",
-                                peer_id
-                            ))
-                            .await;
-                        let pc = old_client.peer_connection.clone();
-                        drop(old_client);
-                        let _node_id = peer_id.clone();
-                        tokio::spawn(async move {
-                            let _ = pc.close().await;
-                        });
-                    }
-                }
-
-                if let Some(node) = self.last_known_nodes.get_mut(&peer_id) {
-                    node.is_online = true;
-                } else {
-                    if let Some(pub_key) = nodeinnet_p2p::get_known_public_key(&peer_id) {
-                        let peers: std::collections::HashMap<String, nodeinnet_p2p::PeerConfig> =
-                            self.peer_store.load();
-                        let (name, os) = if let Some(peer) = peers.get(&peer_id) {
-                            (peer.name.clone(), peer.os.clone())
-                        } else {
-                            (peer_id.clone(), "unknown".to_string())
-                        };
-                        self.last_known_nodes.insert(
-                            peer_id.clone(),
-                            NodeInfo {
-                                id: peer_id.clone(),
-                                name,
-                                os,
-                                version: "0.1.0".to_string(),
-                                app_type: "desktop".to_string(),
-                                build_type: "debug".to_string(),
-                                public_key: pub_key,
-                                resources: vec![],
-                                is_online: true,
-                                last_used: 0,
-                                is_temporary: false,
-                            },
-                        );
-                    }
-                }
-                let all_nodes: Vec<NodeInfo> = self.last_known_nodes.values().cloned().collect();
-                let _ = self.handler.on_update_nodes(all_nodes).await;
-
-                if peer_id > self.my_info.id || self.focused_peer == Some(peer_id.clone()) {
-                    self.handler
-                        .on_log(format!(
-                            "📡 [Mesh] Triggering AutoConnect for peer {}.",
-                            peer_id
-                        ))
-                        .await;
-                    let tx = self.net_tx_bg.clone();
-                    let target_id = peer_id.clone();
-                    tokio::spawn(async move {
-                        let _ = tx.send(NetCmd::AutoConnect(target_id)).await;
-                    });
-                }
-            }
         }
     }
 }

@@ -1,7 +1,6 @@
 use super::types::{NetworkMode, PeerBackoff};
 use crate::{AppEventHandler, NetCmd};
 use nodeinnet_p2p::NodeInfo;
-use p2p_node::local_mesh::LocalMeshSignal;
 use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -19,8 +18,9 @@ pub struct NetworkManager {
     pub current_ws_url: Option<String>,
     pub handler: Arc<dyn AppEventHandler>,
     pub net_tx_bg: tokio_mpsc::Sender<NetCmd>,
-    pub local_discovery_enabled: bool,
-    pub local_discovery_started: bool,
+    pub lan: Option<Arc<p2p_node::lan::Lan>>,
+    pub lan_resources: Vec<nodeinnet_p2p::SharedResource>,
+    pub lan_dials: std::collections::HashMap<String, u64>,
     pub peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
 }
 
@@ -46,8 +46,9 @@ impl NetworkManager {
             current_ws_url: None,
             handler,
             net_tx_bg,
-            local_discovery_enabled: false,
-            local_discovery_started: false,
+            lan: None,
+            lan_resources: Vec::new(),
+            lan_dials: std::collections::HashMap::new(),
             peer_store,
         }
     }
@@ -78,11 +79,11 @@ impl NetworkManager {
             | NetCmd::RegisterUpload { .. } => {
                 self.handle_p2p_cmd(cmd).await;
             }
-            NetCmd::SetLocalDiscovery(enabled) => {
-                self.local_discovery_enabled = enabled;
-                if enabled {
-                    self.start_local_discovery();
-                }
+            NetCmd::Lan(cmd) => self.handle_lan_cmd(cmd).await,
+            NetCmd::SendLanSignal(id, signal) => self.send_lan_signal(&id, signal).await,
+            NetCmd::LanSessionUp(id, connection_id, resources) => {
+                self.handle_lan_session_up(id, connection_id, resources)
+                    .await
             }
             NetCmd::Shutdown => self.shutdown().await,
         }
@@ -98,63 +99,18 @@ impl NetworkManager {
             .drain()
             .map(|(_, peer)| peer.peer_connection.clone())
             .collect();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            futures_util::future::join_all(closing.iter().map(|pc| pc.close())),
-        )
-        .await;
-    }
-
-    pub fn start_local_discovery(&mut self) {
-        if self.local_discovery_started {
-            return;
-        }
-        self.local_discovery_started = true;
-        self.local_discovery_enabled = true;
-
-        let my_id_local = self.my_info.id.clone();
-        let pub_key_local = self.my_info.public_key.clone();
-        let priv_key_local = self.private_key.clone();
-        let my_name_local = self.my_info.name.clone();
-        let my_os_local = self.my_info.os.clone();
-        let handler_local = self.handler.clone();
-        let peer_store_local = self.peer_store.clone();
-
-        tokio::spawn(async move {
-            match p2p_node::local_mesh::start_tcp_signaling_server(
-                my_id_local.clone(),
-                priv_key_local.clone(),
-            )
-            .await
-            {
-                Ok(port) => {
-                    let _ = p2p_node::mdns_discovery::start_mdns_advertiser(
-                        &my_id_local,
-                        &pub_key_local,
-                        &priv_key_local,
-                        port,
-                        &my_name_local,
-                        &my_os_local,
-                    );
-                }
-                Err(e) => {
-                    let _ = handler_local
-                        .on_log(format!("❌ Failed to start TCP signaling server: {}", e))
-                        .await;
-                    let _ = handler_local
-                        .on_ws_state_changed(crate::WsState::LocalMeshError)
-                        .await;
-                }
+        let lan = self.lan.take();
+        let stopping = async move {
+            if let Some(lan) = lan {
+                lan.stop().await;
             }
-            let _ = p2p_node::mdns_discovery::start_mdns_scanner(
-                my_id_local,
-                priv_key_local,
-                peer_store_local,
-            );
-        });
-    }
-
-    pub async fn handle_local_mesh_signal(&mut self, signal: LocalMeshSignal) {
-        self.handle_peer_signal(signal).await;
+        };
+        let _ = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                futures_util::future::join_all(closing.iter().map(|pc| pc.close())),
+            ),
+            stopping,
+        );
     }
 }

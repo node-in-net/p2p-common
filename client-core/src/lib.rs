@@ -11,6 +11,11 @@ use nodeinnet_p2p::rtc::InboundRtcSignal;
 use nodeinnet_p2p::{NodeInfo, P2pMessage, WsMessage};
 use std::path::PathBuf;
 
+pub use p2p_node::lan::{
+    FileTrustStore, Grants, LanConfig, LanDevice, LanEvent, LanState, Link, PairDecision,
+    PairOutcome, PairPrompt, PairReply, RefuseCode, TrustStore, Visibility,
+};
+
 pub enum NetCmd {
     Connect(
         String,
@@ -29,7 +34,7 @@ pub enum NetCmd {
         target_resource_type: nodeinnet_p2p::p2p::ResourceType,
         msg_template: P2pMessage,
     },
-    HandleInboundSignal(InboundRtcSignal),
+    HandleInboundSignal(InboundRtcSignal, Link),
     RegisterUpload {
         peer_id: String,
         transfer_id: uuid::Uuid,
@@ -41,8 +46,25 @@ pub enum NetCmd {
     ReloadResources(Vec<nodeinnet_p2p::SharedResource>),
     UpdateName(String),
     ProcessNodesList(Vec<NodeInfo>),
-    SetLocalDiscovery(bool),
+    Lan(LanCmd),
+    SendLanSignal(String, nodeinnet_p2p::rtc::RtcSignal),
+    LanSessionUp(String, uuid::Uuid, Vec<nodeinnet_p2p::SharedResource>),
     Shutdown,
+}
+
+pub enum LanCmd {
+    SetVisibility(Visibility),
+    Browse(bool),
+    SetResources(Vec<nodeinnet_p2p::SharedResource>),
+    Open(String),
+    Pair(String),
+    ConfirmPair(String, String),
+    CancelPair(String),
+    Forget(String),
+    Block(String),
+    Unblock(String),
+    SetGrants(String, Grants),
+    ResumePairing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -131,6 +153,9 @@ pub trait AppEventHandler: Send + Sync + 'static {
     async fn on_peer_connection_type_changed(&self, _peer_id: String, _connection_type: String) {}
 
     async fn on_local_p2p_event(&self, _event: p2p_node::LocalP2pEvent) {}
+
+    async fn on_pair_request(&self, _prompt: PairPrompt, _reply: PairReply) {}
+    async fn on_lan_event(&self, _event: LanEvent) {}
 }
 
 #[cfg(test)]

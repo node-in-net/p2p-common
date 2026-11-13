@@ -1,5 +1,4 @@
-pub mod local_mesh;
-pub mod mdns_discovery;
+pub mod lan;
 
 use nodeinnet_p2p::{NodeInfo, P2pMessage};
 use std::collections::{HashMap, HashSet};
@@ -81,6 +80,7 @@ pub struct NodeContext {
     pub my_info: NodeInfo,
 
     pub peer_id: String,
+    pub link: lan::Link,
 
     pub is_authenticated: Arc<AtomicBool>,
     pub session_up: Arc<AtomicBool>,
@@ -123,6 +123,7 @@ impl NodeContext {
             local_event_tx,
             my_info,
             peer_id,
+            link: lan::Link::Account,
             is_authenticated: Arc::new(AtomicBool::new(false)),
             session_up: Arc::new(AtomicBool::new(false)),
             remote_resources: Arc::new(Mutex::new(HashMap::new())),

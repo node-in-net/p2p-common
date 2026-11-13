@@ -1,23 +1,40 @@
-use std::net::TcpListener;
+use nodeinnet_p2p::crypto::generate_ed25519_keypair;
+use p2p_node::lan::{Lan, LanConfig, TrustStore, Visibility};
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct Memory(Mutex<Option<String>>);
+
+impl TrustStore for Memory {
+    fn load(&self) -> std::io::Result<Option<String>> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+
+    fn save(&self, doc: &str) -> std::io::Result<()> {
+        *self.0.lock().unwrap() = Some(doc.to_string());
+        Ok(())
+    }
+}
 
 #[tokio::test]
-async fn test_port_occupied_error() {
-    let _listener =
-        TcpListener::bind("127.0.0.1:8308").or_else(|_| TcpListener::bind("0.0.0.0:8308"));
-
-    let my_id = "test_node_id".to_string();
-    let dummy_priv_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string();
-
-    let result = p2p_node::local_mesh::start_tcp_signaling_server(my_id, dummy_priv_key).await;
-
-    assert!(
-        result.is_err(),
-        "Expected start_tcp_signaling_server to fail when port 8308 is occupied"
-    );
-    let err_msg = result.unwrap_err();
-    println!("Captured expected bind error: {}", err_msg);
-    assert!(
-        err_msg.contains("failed to bind to port 8308")
-            || err_msg.contains("failed to listen on port 8308")
-    );
+async fn the_next_port_is_taken_when_8308_is_busy() {
+    let _held = std::net::TcpListener::bind("0.0.0.0:8308")
+        .or_else(|_| std::net::TcpListener::bind("127.0.0.1:8308"));
+    let (signals, _heard) = tokio::sync::mpsc::channel(64);
+    let config = LanConfig {
+        name: "port test".to_string(),
+        os: "linux".to_string(),
+        kind: "test".to_string(),
+        visibility: Visibility::Open,
+        browse: false,
+        port: 8308,
+        resources: vec![],
+        trust: Arc::new(Memory::default()),
+        test_mode: true,
+    };
+    let lan = Lan::start(config, &generate_ed25519_keypair().0, signals)
+        .await
+        .expect("lan");
+    assert_eq!(lan.port(), Some(8309));
+    lan.stop().await;
 }

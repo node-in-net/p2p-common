@@ -2,7 +2,7 @@
 name = "p2p-node"
 version = "0.1.286"
 edition = "2021"
-description = "The peer node: local mesh, mDNS discovery, Noise-encrypted sessions, and resource-access control for incoming messages"
+description = "The peer node: LAN mode (mDNS discovery, Noise tunnels, pairing) and resource-access control for incoming messages"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/node-in-net/p2p-common"
 publish = false
@@ -21,4 +21,11 @@ mdns-sd = "0.20.0"
 snow = "0.9.6"
 sha2 = "0.10"
 base64 = "0.21"
+ed25519-dalek = "2.1"
+if-addrs = "0.15"
+rand = "0.8"
+socket2 = { version = "0.6", features = ["all"] }
+subtle = "2.4"
 
+[dev-dependencies]
+tempfile = "3"

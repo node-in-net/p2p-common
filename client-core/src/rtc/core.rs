@@ -31,12 +31,16 @@ pub async fn handle_core_message(
                 .await;
 
             let my_id = node_context.my_info.id.clone();
+            let pinned = match node_context.link {
+                p2p_node::lan::Link::Lan { key } => Some(p2p_node::lan::id::b64(&key)),
+                p2p_node::lan::Link::Account => None,
+            };
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
-            if now > timestamp_ms && now - timestamp_ms > 60_000 {
+            if pinned.is_none() && now > timestamp_ms && now - timestamp_ms > 60_000 {
                 handler.on_log(format!("❌ Zero-Trust Auth Rejected: Timestamp too old (replay attack prevention) for {}.", target_node_id)).await;
                 handler
                     .on_peer_failed(
@@ -53,8 +57,11 @@ pub async fn handle_core_message(
                 return;
             }
 
-            let mut found_pub_key = None;
+            let mut found_pub_key = pinned;
             for _ in 0..10 {
+                if found_pub_key.is_some() {
+                    break;
+                }
                 if let Some(pub_key) = nodeinnet_p2p::get_known_public_key(&target_node_id) {
                     found_pub_key = Some(pub_key);
                     break;
