@@ -90,7 +90,7 @@ struct Session {
     ctx: IncomingP2pContext,
     seen: Arc<Seen>,
     out_rx: mpsc::Receiver<OutboundP2pPayload>,
-    net_rx: mpsc::Receiver<NetCmd>,
+    net_rx: mpsc::UnboundedReceiver<NetCmd>,
     store: Arc<MemoryPeerStore>,
     my_id: String,
     peer_id: String,
@@ -126,7 +126,7 @@ async fn open(my_resources: Vec<SharedResource>) -> Session {
         .create_data_channel("gate", None)
         .await
         .expect("data channel");
-    let (net_tx, net_rx) = mpsc::channel(16);
+    let (net_tx, net_rx) = mpsc::unbounded_channel();
     let seen = Arc::new(Seen::default());
     Session {
         ctx: IncomingP2pContext {

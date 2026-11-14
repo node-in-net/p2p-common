@@ -65,6 +65,13 @@ impl NetworkManager {
             NetCmd::SendToPeer(node_id, msg) => {
                 if let Some(rtc) = self.active_peers.get(&node_id) {
                     let _ = rtc.send_p2p_message(msg).await;
+                } else if let P2pMessage::FileUploadRequest { transfer_id, .. } = msg {
+                    self.handler
+                        .on_p2p_message(P2pMessage::FileTransferReceipt {
+                            transfer_id,
+                            result: Err("no connection to the device".to_string()),
+                        })
+                        .await;
                 }
             }
             NetCmd::BroadcastP2pMessage {
@@ -83,19 +90,6 @@ impl NetworkManager {
                                 .await;
                         }
                     }
-                }
-            }
-            NetCmd::RegisterUpload {
-                peer_id,
-                transfer_id,
-                local_file_path,
-            } => {
-                if let Some(rtc) = self.active_peers.get(&peer_id) {
-                    rtc.node_context
-                        .active_uploads
-                        .lock()
-                        .await
-                        .insert(transfer_id, local_file_path);
                 }
             }
             _ => {}

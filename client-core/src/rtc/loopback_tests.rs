@@ -65,7 +65,7 @@ fn make_node(id: &str, public_key: &str) -> NodeInfo {
 type IceBuffer = Arc<Mutex<Vec<(String, Option<String>, Option<u16>)>>>;
 
 fn spawn_ice_router(
-    mut rx: mpsc::Receiver<NetCmd>,
+    mut rx: mpsc::UnboundedReceiver<NetCmd>,
     target: Arc<WebRtcClient>,
     ready: Arc<AtomicBool>,
     buf: IceBuffer,
@@ -147,11 +147,11 @@ async fn build_client(
     label: &'static str,
 ) -> (
     Arc<WebRtcClient>,
-    mpsc::Receiver<NetCmd>,
+    mpsc::UnboundedReceiver<NetCmd>,
     Arc<Mutex<Vec<P2pMessage>>>,
 ) {
     let (handler, inbox) = TestHandler::new(label, verbose);
-    let (net_tx, net_rx) = mpsc::channel(256);
+    let (net_tx, net_rx) = mpsc::unbounded_channel();
     let cfg = std::sync::Arc::new(nodeinnet_p2p::MemoryPeerStore::default());
     let client = WebRtcClient::new(
         handler,
@@ -237,6 +237,71 @@ async fn establish_counted_pair(
 async fn close_pair(a: &Arc<WebRtcClient>, b: &Arc<WebRtcClient>) {
     let _ = a.peer_connection.close().await;
     let _ = b.peer_connection.close().await;
+}
+
+const CHUNK: usize = 16 * 1024;
+const FLOOD: usize = 2048;
+
+async fn stop_reading(peer: &Arc<WebRtcClient>) {
+    let dc = peer
+        .data_channel
+        .lock()
+        .await
+        .clone()
+        .expect("an open DataChannel after auth");
+    dc.on_message(Box::new(|_| Box::pin(std::future::pending())));
+}
+
+fn flood(client: Arc<WebRtcClient>, sent: Arc<AtomicUsize>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let transfer_id = uuid::Uuid::new_v4();
+        for i in 0..FLOOD {
+            client
+                .send_p2p_message(P2pMessage::FileChunk {
+                    transfer_id,
+                    offset: (i * CHUNK) as u64,
+                    data: vec![0; CHUNK],
+                })
+                .await
+                .expect("send_p2p_message");
+            sent.fetch_add(1, Ordering::SeqCst);
+        }
+    })
+}
+
+async fn until_stalled(sent: &AtomicUsize) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut last = usize::MAX;
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let now = sent.load(Ordering::SeqCst);
+        if now == last {
+            return now;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sender never settled"
+        );
+        last = now;
+    }
+}
+
+async fn stalled_sender(
+    verbose: bool,
+) -> (
+    Arc<WebRtcClient>,
+    Arc<WebRtcClient>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (a, b, _b_inbox) = establish_authenticated_pair(verbose).await;
+    stop_reading(&b).await;
+    let sent = Arc::new(AtomicUsize::new(0));
+    let sender = flood(a.clone(), sent.clone());
+    assert!(
+        until_stalled(&sent).await < FLOOD,
+        "the sender never waited for the link"
+    );
+    (a, b, sender)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -408,6 +473,40 @@ async fn loopback_each_side_announces_the_session_once() {
     close_pair(&a, &b).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs loopback UDP; run with --ignored"]
+async fn loopback_a_stalled_send_ends_when_the_peer_closes() {
+    let verbose = std::env::var("RTC_TEST_VERBOSE").is_ok();
+    let (a, b, sender) = stalled_sender(verbose).await;
+
+    let _ = b.peer_connection.close().await;
+    tokio::time::timeout(Duration::from_secs(20), sender)
+        .await
+        .expect("a send to a peer that closed never returned")
+        .expect("the sender panicked");
+    close_pair(&a, &b).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs loopback UDP; run with --ignored"]
+async fn loopback_a_stalled_send_ends_when_the_link_dies() {
+    let verbose = std::env::var("RTC_TEST_VERBOSE").is_ok();
+    let (a, b, sender) = stalled_sender(verbose).await;
+
+    let _ = b
+        .peer_connection
+        .sctp()
+        .transport()
+        .ice_transport()
+        .stop()
+        .await;
+    tokio::time::timeout(Duration::from_secs(90), sender)
+        .await
+        .expect("a send over a dead link never returned")
+        .expect("the sender panicked");
+    close_pair(&a, &b).await;
+}
+
 #[tokio::test]
 async fn a_download_request_is_registered_on_its_way_out() {
     let me = make_node(&uuid::Uuid::new_v4().to_string(), "");
@@ -440,4 +539,152 @@ async fn a_download_request_is_registered_on_its_way_out() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(ctx.requested_downloads.lock().await.contains(&transfer_id));
+}
+
+#[tokio::test]
+async fn an_upload_request_is_recorded_on_its_way_out() {
+    let me = make_node(&uuid::Uuid::new_v4().to_string(), "");
+    let (client, _net_rx, _inbox) = build_client(&me, "peer", "", false, "A").await;
+    let ctx = &client.node_context;
+    ctx.is_authenticated.store(true, Ordering::SeqCst);
+    ctx.session_keys.lock().await.insert(
+        "fs-theirs".to_string(),
+        nodeinnet_p2p::crypto::generate_session_token(),
+    );
+    let transfer_id = uuid::Uuid::new_v4();
+
+    client
+        .send_p2p_message(upload_request(transfer_id))
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while client.pending_messages.lock().await.is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pipeline never queued the request"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(ctx.unconfirmed_uploads.lock().await.contains(&transfer_id));
+}
+
+fn upload_request(transfer_id: uuid::Uuid) -> P2pMessage {
+    P2pMessage::FileUploadRequest {
+        resource_id: "fs-theirs".to_string(),
+        target_path: "/".to_string(),
+        file_name: "bob.txt".to_string(),
+        total_size: 3,
+        transfer_id,
+        permissions: None,
+    }
+}
+
+fn receipts(inbox: &[P2pMessage]) -> Vec<(uuid::Uuid, bool)> {
+    inbox
+        .iter()
+        .filter_map(|msg| match msg {
+            P2pMessage::FileTransferReceipt {
+                transfer_id,
+                result,
+            } => Some((*transfer_id, result.is_ok())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_end_of_a_session_fails_each_unconfirmed_upload_once() {
+    let me = make_node(&uuid::Uuid::new_v4().to_string(), "");
+    let (client, _net_rx, inbox) = build_client(&me, "peer", "", false, "A").await;
+    let mut uploads = [uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+    uploads.sort();
+    client
+        .node_context
+        .unconfirmed_uploads
+        .lock()
+        .await
+        .extend(uploads);
+
+    let _ = client.peer_connection.close().await;
+    client.end_session().await;
+
+    let mut failed = receipts(&inbox.lock().await);
+    failed.sort();
+    assert_eq!(failed, uploads.map(|id| (id, false)));
+}
+
+#[tokio::test]
+async fn an_upload_request_dropped_for_want_of_a_session_key_is_answered() {
+    let me = make_node(&uuid::Uuid::new_v4().to_string(), "");
+    let (client, _net_rx, inbox) = build_client(&me, "peer", "", false, "A").await;
+    let transfer_id = uuid::Uuid::new_v4();
+
+    client
+        .send_p2p_message(upload_request(transfer_id))
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while receipts(&inbox.lock().await).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped request was never answered"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(receipts(&inbox.lock().await), [(transfer_id, false)]);
+    assert!(
+        !client
+            .node_context
+            .unconfirmed_uploads
+            .lock()
+            .await
+            .contains(&transfer_id)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs loopback UDP; run with --ignored"]
+async fn loopback_a_confirmed_upload_gets_no_second_receipt() {
+    let verbose = std::env::var("RTC_TEST_VERBOSE").is_ok();
+    let (a, b, b_inbox) = establish_authenticated_pair(verbose).await;
+    b.node_context.session_keys.lock().await.insert(
+        "fs-theirs".to_string(),
+        nodeinnet_p2p::crypto::generate_session_token(),
+    );
+    let (confirmed, unanswered) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    for id in [confirmed, unanswered] {
+        b.send_p2p_message(upload_request(id)).await.unwrap();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while b.node_context.unconfirmed_uploads.lock().await.len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the requests never went out"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    a.send_p2p_message(P2pMessage::FileTransferReceipt {
+        transfer_id: confirmed,
+        result: Ok(()),
+    })
+    .await
+    .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while receipts(&b_inbox.lock().await).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the receipt never arrived"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    close_pair(&a, &b).await;
+    b.end_session().await;
+
+    assert_eq!(
+        receipts(&b_inbox.lock().await),
+        [(confirmed, true), (unanswered, false)]
+    );
 }

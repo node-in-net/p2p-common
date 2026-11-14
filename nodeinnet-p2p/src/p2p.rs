@@ -182,6 +182,10 @@ pub enum P2pMessage {
         transfer_id: Uuid,
         checksum: Option<String>,
     },
+    FileTransferReceipt {
+        transfer_id: Uuid,
+        result: Result<(), String>,
+    },
 
     RequestRegistryKeys {
         request_id: Uuid,
@@ -522,7 +526,8 @@ impl P2pMessage {
             | P2pMessage::RtcSignal { .. }
             | P2pMessage::RequestTopology
             | P2pMessage::ResponseTopology { .. }
-            | P2pMessage::FileTransferComplete { .. } => vec![],
+            | P2pMessage::FileTransferComplete { .. }
+            | P2pMessage::FileTransferReceipt { .. } => vec![],
         }
     }
 
@@ -584,6 +589,7 @@ impl P2pMessage {
             P2pMessage::FileTransferResponse { .. } => None,
             P2pMessage::FileChunk { .. } => None,
             P2pMessage::FileTransferComplete { .. } => None,
+            P2pMessage::FileTransferReceipt { .. } => None,
             P2pMessage::TextMessage { .. } => None,
             P2pMessage::Handshake { .. } => None,
             P2pMessage::Goodbye => None,
@@ -1040,5 +1046,46 @@ mod ranged_downloads {
             asking_for(4, Some(3)).resource_id().map(String::as_str),
             Some("res")
         );
+    }
+}
+
+#[cfg(test)]
+mod upload_receipts {
+    use super::*;
+
+    fn receipts() -> [P2pMessage; 2] {
+        [
+            P2pMessage::FileTransferReceipt {
+                transfer_id: Uuid::new_v4(),
+                result: Ok(()),
+            },
+            P2pMessage::FileTransferReceipt {
+                transfer_id: Uuid::new_v4(),
+                result: Err("bytes 0..16384 never arrived".to_string()),
+            },
+        ]
+    }
+
+    #[test]
+    fn both_answers_survive_the_wire() {
+        for msg in receipts() {
+            let envelope = SecuredP2pEnvelope {
+                mac: None,
+                message: msg,
+            };
+            let bytes = to_bson_vec(&envelope).expect("serialises");
+            let back: SecuredP2pEnvelope = from_bson_slice(&bytes).expect("deserialises");
+            assert_eq!(format!("{back:?}"), format!("{envelope:?}"));
+        }
+    }
+
+    #[test]
+    fn a_receipt_is_unsigned_and_ungated_like_the_end_of_a_transfer() {
+        for mut msg in receipts() {
+            assert_eq!(msg.resource_id(), None);
+            assert!(msg.allowed_resource_types().is_empty());
+            msg.set_resource_id("fs-abc".to_string());
+            assert_eq!(msg.resource_id(), None);
+        }
     }
 }

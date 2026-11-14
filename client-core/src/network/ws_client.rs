@@ -74,25 +74,22 @@ impl NetworkManager {
                                 {
                                     match ws_msg {
                                         WsMessage::InboundRtcSignal(inbound) => {
-                                            let _ = net_tx_read
-                                                .send(NetCmd::HandleInboundSignal(
-                                                    inbound,
-                                                    Link::Account,
-                                                ))
-                                                .await;
+                                            let _ = net_tx_read.send(NetCmd::HandleInboundSignal(
+                                                inbound,
+                                                Link::Account,
+                                            ));
                                             continue;
                                         }
                                         WsMessage::NodesList { nodes } => {
-                                            let _ = net_tx_read
-                                                .send(NetCmd::ProcessNodesList(nodes))
-                                                .await;
+                                            let _ =
+                                                net_tx_read.send(NetCmd::ProcessNodesList(nodes));
                                             continue;
                                         }
                                         _ => {}
                                     }
                                 }
                             }
-                            let _ = net_tx_read.send(NetCmd::Disconnect).await;
+                            let _ = net_tx_read.send(NetCmd::Disconnect);
                         });
 
                         let write_task = tokio::spawn(async move {
@@ -145,7 +142,7 @@ impl NetworkManager {
                     ))
                     .await;
                 for id in peers {
-                    let _ = self.net_tx_bg.send(NetCmd::DisconnectPeer(id)).await;
+                    let _ = self.net_tx_bg.send(NetCmd::DisconnectPeer(id));
                 }
             }
             NetCmd::Disconnect => {
@@ -216,6 +213,7 @@ impl NetworkManager {
                 for active_id in active_ids {
                     if !nodes.iter().any(|n| n.id == active_id) {
                         if let Some(peer) = self.active_peers.remove(&active_id) {
+                            peer.end_session().await;
                             let pc = peer.peer_connection.clone();
                             drop(peer);
                             let _peer_id = active_id.clone();
@@ -265,6 +263,7 @@ impl NetworkManager {
                                 .is_some_and(|peer| peer.link == Link::Account)
                         {
                             if let Some(peer) = self.active_peers.remove(&node.id) {
+                                peer.end_session().await;
                                 let pc = peer.peer_connection.clone();
                                 drop(peer);
                                 let _peer_id = node.id.clone();
@@ -280,7 +279,7 @@ impl NetworkManager {
                             let target_id = node.id.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                let _ = tx.send(NetCmd::Call(target_id)).await;
+                                let _ = tx.send(NetCmd::Call(target_id));
                             });
                         }
                     }
@@ -299,7 +298,7 @@ impl NetworkManager {
                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
                                     .await;
                             }
-                            let _ = tx.send(NetCmd::AutoConnect(target_id)).await;
+                            let _ = tx.send(NetCmd::AutoConnect(target_id));
                         });
                     }
 
@@ -329,6 +328,7 @@ impl NetworkManager {
                     {
                         lan.session(&id, None);
                     }
+                    peer.end_session().await;
                     let pc = peer.peer_connection.clone();
                     drop(peer);
                     tokio::spawn(async move {
@@ -344,14 +344,11 @@ impl NetworkManager {
                 }
                 self.my_info.name = name;
                 if let Some(url) = self.current_ws_url.clone() {
-                    let _ = self
-                        .net_tx_bg
-                        .send(NetCmd::Connect(
-                            url,
-                            self.my_info.clone(),
-                            self.current_turn_credentials.clone(),
-                        ))
-                        .await;
+                    let _ = self.net_tx_bg.send(NetCmd::Connect(
+                        url,
+                        self.my_info.clone(),
+                        self.current_turn_credentials.clone(),
+                    ));
                 }
             }
             _ => {}

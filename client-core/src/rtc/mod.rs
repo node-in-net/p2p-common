@@ -143,6 +143,11 @@ async fn send_chunked_binary(
             .map_err(|e| e.to_string())?;
         if dc.buffered_amount().await > HIGH_WATER {
             while dc.buffered_amount().await > LOW_WATER {
+                if dc.ready_state()
+                    != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+                {
+                    return Err("the data channel closed".to_string());
+                }
                 tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
             }
         }
@@ -264,7 +269,7 @@ struct IncomingP2pContext {
     node_context: NodeContext,
     target_node_id: String,
     last_pong: Arc<AtomicU64>,
-    net_tx: tokio_mpsc::Sender<crate::NetCmd>,
+    net_tx: tokio_mpsc::UnboundedSender<crate::NetCmd>,
     peer_connection: Arc<RTCPeerConnection>,
     connection_id: uuid::Uuid,
 }
@@ -1042,6 +1047,19 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
             return;
         }
 
+        if let P2pMessage::FileTransferReceipt { transfer_id, .. }
+        | P2pMessage::FileTransferResponse {
+            transfer_id,
+            status: nodeinnet_p2p::FileTransferStatus::Rejected { .. },
+        } = &p2p_msg
+        {
+            node_context
+                .unconfirmed_uploads
+                .lock()
+                .await
+                .remove(transfer_id);
+        }
+
         handler.on_p2p_message(p2p_msg.clone()).await;
 
         node_context.process_message(p2p_msg.clone()).await;
@@ -1071,7 +1089,7 @@ async fn handle_incoming_p2p_message(msg_data: &[u8], ctx: IncomingP2pContext) {
 async fn announce_session(
     node_context: &NodeContext,
     handler: &Arc<dyn crate::AppEventHandler>,
-    net_tx: &tokio_mpsc::Sender<crate::NetCmd>,
+    net_tx: &tokio_mpsc::UnboundedSender<crate::NetCmd>,
     peer_connection: &Arc<RTCPeerConnection>,
     target_node_id: &str,
     connection_id: uuid::Uuid,
@@ -1094,12 +1112,35 @@ async fn announce_session(
             crate::NetCmd::LanSessionUp(target_node_id.to_string(), connection_id, resources)
         }
     };
-    let _ = net_tx.send(announced).await;
+    let _ = net_tx.send(announced);
     spawn_connection_type_poller(
         peer_connection.clone(),
         target_node_id.to_string(),
         handler.clone(),
     );
+}
+
+pub(crate) async fn end_session(
+    node_context: &NodeContext,
+    handler: &Arc<dyn crate::AppEventHandler>,
+) {
+    let unconfirmed: Vec<uuid::Uuid> = node_context
+        .unconfirmed_uploads
+        .lock()
+        .await
+        .drain()
+        .collect();
+    for transfer_id in unconfirmed {
+        handler
+            .on_p2p_message(P2pMessage::FileTransferReceipt {
+                transfer_id,
+                result: Err(
+                    "the connection to the device ended before it confirmed the upload".to_string(),
+                ),
+            })
+            .await;
+    }
+    node_context.shutdown().await;
 }
 
 fn signal_cmd(link: Link, to_node_id: String, signal: RtcSignal) -> NetCmd {
@@ -1132,7 +1173,7 @@ pub struct WebRtcClient {
     pub node_context: NodeContext,
     pub pending_messages: Arc<Mutex<Vec<nodeinnet_p2p::SecuredP2pEnvelope>>>,
     pub private_key: String,
-    pub net_tx: tokio_mpsc::Sender<NetCmd>,
+    pub net_tx: tokio_mpsc::UnboundedSender<NetCmd>,
     pub created_at: std::time::Instant,
 }
 
@@ -1140,7 +1181,7 @@ impl WebRtcClient {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         handler: std::sync::Arc<dyn crate::AppEventHandler>,
-        net_tx: tokio_mpsc::Sender<NetCmd>,
+        net_tx: tokio_mpsc::UnboundedSender<NetCmd>,
         my_info: NodeInfo,
         target_node_id: String,
         private_key: String,
@@ -1346,6 +1387,9 @@ impl WebRtcClient {
             })
         }));
 
+        let data_channel_store: Arc<Mutex<Option<Arc<RTCDataChannel>>>> =
+            Arc::new(Mutex::new(None));
+
         let handler_state = handler.clone();
         let target_node_state = target_node_id.clone();
         let net_tx_state = net_tx.clone();
@@ -1353,6 +1397,7 @@ impl WebRtcClient {
         let connection_id_state = connection_id;
         let pc_state = peer_connection.clone();
         let my_id_state = my_info.id.clone();
+        let dc_store_state = data_channel_store.clone();
         peer_connection.on_peer_connection_state_change(Box::new(move |s: webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState| {
             let handler = handler_state.clone();
             let target = target_node_state.clone();
@@ -1361,6 +1406,7 @@ impl WebRtcClient {
             let conn_id = connection_id_state;
             let pc = pc_state.clone();
             let my_id = my_id_state.clone();
+            let dc_store = dc_store_state.clone();
             Box::pin(async move {
                 if s == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::New {
                     return;
@@ -1386,8 +1432,12 @@ impl WebRtcClient {
                    s == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed
                 {
                     handler.on_log(format!("⚠️ Peer {} transport is broken ({:?}). Tearing down session to allow AutoConnect...", target, s)).await;
-                    let _ = net_tx.send(crate::NetCmd::DisconnectPeerSession(target.clone(), conn_id)).await;
-                    lctx.shutdown().await;
+                    let _ = net_tx.send(crate::NetCmd::DisconnectPeerSession(target.clone(), conn_id));
+                    let dc = dc_store.lock().await.clone();
+                    if let Some(dc) = dc {
+                        let _ = dc.close().await;
+                    }
+                    end_session(&lctx, &handler).await;
                 }
 
                 if s == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Disconnected {
@@ -1427,7 +1477,7 @@ impl WebRtcClient {
                                     if pc_delay.set_local_description(offer).await.is_ok()
                                         && let Some(local) = pc_delay.local_description().await {
                                             let offer = RtcSignal::Offer { sdp: local.sdp, ice_restart: true };
-                                            let _ = net_tx_delay.send(signal_cmd(link, target_delay.clone(), offer)).await;
+                                            let _ = net_tx_delay.send(signal_cmd(link, target_delay.clone(), offer));
                                         }
                                     let _ = wait_until_signaling_stable(
                                 &pc_delay,
@@ -1451,8 +1501,8 @@ impl WebRtcClient {
                         let st = pc_delay.connection_state();
                         if st == RTCPeerConnectionState::Disconnected || st == RTCPeerConnectionState::Failed {
                             let _ = handler_delay.on_log(format!("⚠️ Peer {} still {:?} after ICE restart window. Tearing down session to allow AutoConnect...", target_delay, st)).await;
-                            let _ = net_tx_delay.send(crate::NetCmd::DisconnectPeerSession(target_delay, conn_id)).await;
-                            lctx_delay.shutdown().await;
+                            let _ = net_tx_delay.send(crate::NetCmd::DisconnectPeerSession(target_delay, conn_id));
+                            end_session(&lctx_delay, &handler_delay).await;
                         }
                     });
                 }
@@ -1475,9 +1525,6 @@ impl WebRtcClient {
                 })
             },
         ));
-
-        let data_channel_store: Arc<Mutex<Option<Arc<RTCDataChannel>>>> =
-            Arc::new(Mutex::new(None));
 
         let dc_store_for_pipe = data_channel_store.clone();
         let pm_for_pipe = pending_messages.clone();
@@ -1519,6 +1566,16 @@ impl WebRtcClient {
                                     res_id
                                 ))
                                 .await;
+                            if let P2pMessage::FileUploadRequest { transfer_id, .. } = &msg {
+                                handler_for_our_rx_loop
+                                    .on_p2p_message(P2pMessage::FileTransferReceipt {
+                                        transfer_id: *transfer_id,
+                                        result: Err(
+                                            "no session with the device for this share".to_string()
+                                        ),
+                                    })
+                                    .await;
+                            }
                             continue;
                         }
                     } else {
@@ -1539,6 +1596,19 @@ impl WebRtcClient {
                 {
                     node_context_for_pipe
                         .requested_downloads
+                        .lock()
+                        .await
+                        .insert(*transfer_id);
+                }
+                if let nodeinnet_p2p::OutboundP2pPayload::Message(
+                    nodeinnet_p2p::SecuredP2pEnvelope {
+                        message: P2pMessage::FileUploadRequest { transfer_id, .. },
+                        ..
+                    },
+                ) = &payload
+                {
+                    node_context_for_pipe
+                        .unconfirmed_uploads
                         .lock()
                         .await
                         .insert(*transfer_id);
@@ -1651,7 +1721,7 @@ impl WebRtcClient {
                         sdp_mid: json.sdp_mid,
                         sdp_mline_index: json.sdp_mline_index,
                     };
-                    let _ = net_tx.send(signal_cmd(link, target, signal)).await;
+                    let _ = net_tx.send(signal_cmd(link, target, signal));
                 }
             })
         }));
@@ -1753,6 +1823,8 @@ impl WebRtcClient {
             let last_pong_ping = last_pong_dc.clone();
             let private_key_for_open = private_key_dc.clone();
             let dc_write_lock_open = node_ctx_dc.dc_write_lock.clone();
+            let net_tx_open = net_tx_dc.clone();
+            let connection_id_open = connection_id_dc;
             d.on_open(Box::new(move || {
                 let handler = handler_open.clone();
                 let my_info = my_info_open.clone();
@@ -1762,6 +1834,7 @@ impl WebRtcClient {
                 let last_pong_ping = last_pong_ping.clone();
                 let d_private_key_open = private_key_for_open.clone();
                 let dc_write_lock = dc_write_lock_open.clone();
+                let net_tx_ping = net_tx_open.clone();
                 Box::pin(async move {
                     handler.on_log(
                         "🟢 Incoming WebRTC DataChannel Opened! Ready to send & receive."
@@ -1816,6 +1889,7 @@ impl WebRtcClient {
                             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                             if ts - last_pong_ping.load(Ordering::Relaxed) > pong_timeout_ms() {
                                 handler.on_log(format!("⚠️ P2P connection to {} timed out (no pong).", target_node_ping)).await;
+                                let _ = net_tx_ping.send(crate::NetCmd::DisconnectPeerSession(target_node_ping.clone(), connection_id_open));
                                 let _ = dc_ping.close().await;
                                 break;
                             }
@@ -1842,8 +1916,8 @@ impl WebRtcClient {
                 let conn_id = connection_id_close;
                 Box::pin(async move {
                     handler.on_log(format!("🔴 WebRTC DataChannel Closed for {} (session ID: {}).", target, conn_id)).await;
-                    let _ = net_tx.send(crate::NetCmd::DisconnectPeerSession(target, conn_id)).await;
-                    ctx.shutdown().await;
+                    let _ = net_tx.send(crate::NetCmd::DisconnectPeerSession(target, conn_id));
+                    end_session(&ctx, &handler).await;
                 })
             }));
 
@@ -1893,6 +1967,8 @@ impl WebRtcClient {
         let handler_open = self.handler.clone();
         let private_key_for_open = self.private_key.clone();
         let dc_write_lock_open = self.node_context.dc_write_lock.clone();
+        let net_tx_open = self.net_tx.clone();
+        let connection_id_open = self.connection_id;
         data_channel.on_open(Box::new(move || {
             let handler = handler_open.clone();
             let version = my_version.clone();
@@ -1902,6 +1978,7 @@ impl WebRtcClient {
             let last_pong_ping = last_pong_ping.clone();
             let d_private_key_open = private_key_for_open.clone();
             let dc_write_lock = dc_write_lock_open.clone();
+            let net_tx_ping = net_tx_open.clone();
             Box::pin(async move {
                 handler
                     .on_log("🟢 WebRTC DataChannel Opened! Ready to send & receive.".to_string())
@@ -1985,6 +2062,10 @@ impl WebRtcClient {
                                     target_node_ping
                                 ))
                                 .await;
+                            let _ = net_tx_ping.send(crate::NetCmd::DisconnectPeerSession(
+                                target_node_ping.clone(),
+                                connection_id_open,
+                            ));
                             let _ = dc_ping.close().await;
                             break;
                         }
@@ -2084,10 +2165,8 @@ impl WebRtcClient {
                         target, conn_id
                     ))
                     .await;
-                let _ = net_tx
-                    .send(crate::NetCmd::DisconnectPeerSession(target, conn_id))
-                    .await;
-                lctx.shutdown().await;
+                let _ = net_tx.send(crate::NetCmd::DisconnectPeerSession(target, conn_id));
+                end_session(&lctx, &handler).await;
             })
         }));
 
@@ -2160,6 +2239,10 @@ impl WebRtcClient {
             .send(nodeinnet_p2p::OutboundP2pPayload::UnsignedMessage(msg))
             .await;
         Ok(())
+    }
+
+    pub async fn end_session(&self) {
+        end_session(&self.node_context, &self.handler).await;
     }
 
     pub async fn get_connection_type(&self) -> String {

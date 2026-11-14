@@ -314,6 +314,7 @@ impl NetworkManager {
             self.handler
                 .on_log(format!("🔴 [LAN] Ended the session with {}", id))
                 .await;
+            peer.end_session().await;
             let pc = peer.peer_connection.clone();
             drop(peer);
             let handler = self.handler.clone();
@@ -558,7 +559,7 @@ mod tests {
     #[tokio::test]
     async fn forget_ends_the_lan_session_at_once() {
         let handler: Arc<dyn AppEventHandler> = Arc::new(Quiet);
-        let (net_tx, _net_rx) = tokio_mpsc::channel(64);
+        let (net_tx, _net_rx) = tokio_mpsc::unbounded_channel();
         let store: Arc<dyn nodeinnet_p2p::PeerStore> =
             Arc::new(nodeinnet_p2p::MemoryPeerStore::default());
         let (private_key, _) = nodeinnet_p2p::crypto::generate_ed25519_keypair();
@@ -620,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn a_session_that_came_up_is_not_reaped() {
         let handler: Arc<dyn AppEventHandler> = Arc::new(Quiet);
-        let (net_tx, _net_rx) = tokio_mpsc::channel(64);
+        let (net_tx, _net_rx) = tokio_mpsc::unbounded_channel();
         let store: Arc<dyn nodeinnet_p2p::PeerStore> =
             Arc::new(nodeinnet_p2p::MemoryPeerStore::default());
         let (private_key, _) = nodeinnet_p2p::crypto::generate_ed25519_keypair();

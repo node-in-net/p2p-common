@@ -32,7 +32,7 @@ impl NetworkManager {
                     };
 
                     if should_retry {
-                        let _ = self.net_tx_bg.send(NetCmd::AutoConnect(node_id)).await;
+                        let _ = self.net_tx_bg.send(NetCmd::AutoConnect(node_id));
                     }
                 }
             }
@@ -99,6 +99,7 @@ impl NetworkManager {
                     self.handler
                         .on_log(format!("🔴 Dropped active P2P session with {}", node_id))
                         .await;
+                    peer.end_session().await;
 
                     let handler_clone = self.handler.clone();
                     let node_id_clone = node_id.clone();
@@ -159,6 +160,7 @@ impl NetworkManager {
                                 node_id, conn_id
                             ))
                             .await;
+                        peer.end_session().await;
                         let handler_clone = self.handler.clone();
                         let node_id_clone = node_id.clone();
                         tokio::spawn(async move {
@@ -367,6 +369,7 @@ impl NetworkManager {
                                     inbound.from_node_id
                                 ))
                                 .await;
+                            old_client.end_session().await;
                             let pc = old_client.peer_connection.clone();
                             drop(old_client);
                             let _peer_id = inbound.from_node_id.clone();
@@ -482,10 +485,7 @@ impl NetworkManager {
 
                     if is_stuck || is_dead {
                         self.handler.on_log(format!("⚠️ [AutoConnect] Peer {} is in stuck/dead state {:?}. Reaping it...", node_id, state)).await;
-                        let _ = self
-                            .net_tx_bg
-                            .send(NetCmd::DisconnectPeer(node_id.clone()))
-                            .await;
+                        let _ = self.net_tx_bg.send(NetCmd::DisconnectPeer(node_id.clone()));
                         return;
                     } else {
                         self.handler.on_log(format!("⏭️ [AutoConnect] Skipping {} because it is already active (state: {:?})", node_id, state)).await;
@@ -658,6 +658,7 @@ impl NetworkManager {
                             ))
                             .await;
                         if let Some(peer) = self.active_peers.remove(&node_id) {
+                            peer.end_session().await;
                             let pc = peer.peer_connection.clone();
                             drop(peer);
                             let _peer_id = node_id.clone();

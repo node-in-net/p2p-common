@@ -157,7 +157,7 @@ pub async fn handle_core_message(
                     target_node_id
                 ))
                 .await;
-            node_context.shutdown().await;
+            crate::rtc::end_session(&node_context, &handler).await;
             let _ = dc.close().await;
         }
         P2pMessage::Ping(ts) => {
@@ -205,6 +205,7 @@ pub async fn handle_core_message(
         | P2pMessage::HttpResponseChunk { .. }
         | P2pMessage::HttpResponseComplete { .. }
         | P2pMessage::FileTransferComplete { .. }
+        | P2pMessage::FileTransferReceipt { .. }
         | P2pMessage::FileTransferResponse { .. }
         | P2pMessage::FileChunk { .. }
         | P2pMessage::TerminalOutput { .. }

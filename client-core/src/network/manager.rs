@@ -17,7 +17,7 @@ pub struct NetworkManager {
     pub current_turn_credentials: Option<nodeinnet_p2p::rtc::TurnCredentials>,
     pub current_ws_url: Option<String>,
     pub handler: Arc<dyn AppEventHandler>,
-    pub net_tx_bg: tokio_mpsc::Sender<NetCmd>,
+    pub net_tx_bg: tokio_mpsc::UnboundedSender<NetCmd>,
     pub lan: Option<Arc<p2p_node::lan::Lan>>,
     pub lan_resources: Vec<nodeinnet_p2p::SharedResource>,
     pub lan_dials: std::collections::HashMap<String, u64>,
@@ -29,7 +29,7 @@ impl NetworkManager {
         my_info: NodeInfo,
         private_key: String,
         handler: Arc<dyn AppEventHandler>,
-        net_tx_bg: tokio_mpsc::Sender<NetCmd>,
+        net_tx_bg: tokio_mpsc::UnboundedSender<NetCmd>,
         peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
     ) -> Self {
         Self {
@@ -75,8 +75,7 @@ impl NetworkManager {
             | NetCmd::SendP2p(..)
             | NetCmd::SendP2pMessage(..)
             | NetCmd::SendToPeer(..)
-            | NetCmd::BroadcastP2pMessage { .. }
-            | NetCmd::RegisterUpload { .. } => {
+            | NetCmd::BroadcastP2pMessage { .. } => {
                 self.handle_p2p_cmd(cmd).await;
             }
             NetCmd::Lan(cmd) => self.handle_lan_cmd(cmd).await,
@@ -94,11 +93,7 @@ impl NetworkManager {
         for task in self.ws_tasks.drain(..) {
             task.abort();
         }
-        let closing: Vec<_> = self
-            .active_peers
-            .drain()
-            .map(|(_, peer)| peer.peer_connection.clone())
-            .collect();
+        let closing: Vec<_> = self.active_peers.drain().map(|(_, peer)| peer).collect();
         let lan = self.lan.take();
         let stopping = async move {
             if let Some(lan) = lan {
@@ -108,7 +103,10 @@ impl NetworkManager {
         let _ = tokio::join!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                futures_util::future::join_all(closing.iter().map(|pc| pc.close())),
+                futures_util::future::join_all(closing.iter().map(|peer| async move {
+                    peer.end_session().await;
+                    let _ = peer.peer_connection.close().await;
+                })),
             ),
             stopping,
         );

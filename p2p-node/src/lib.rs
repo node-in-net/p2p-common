@@ -60,12 +60,21 @@ pub enum LocalP2pEvent {
     },
 }
 
-pub type ActiveDownload = (
-    PathBuf,
-    u64,
-    Option<u32>,
-    Option<Arc<Mutex<tokio::fs::File>>>,
-);
+#[derive(Clone)]
+pub struct ActiveDownload {
+    pub path: PathBuf,
+    pub total_size: u64,
+    pub upload: Option<ActiveUpload>,
+}
+
+#[derive(Clone)]
+pub struct ActiveUpload {
+    pub file: Arc<Mutex<tokio::fs::File>>,
+    pub temp: PathBuf,
+    pub permissions: Option<u32>,
+    pub stored: u64,
+    pub reservation: Arc<dyn std::any::Any + Send + Sync>,
+}
 
 pub type ActiveTerminal = (mpsc::Sender<Vec<u8>>, mpsc::Sender<(u16, u16)>, uuid::Uuid);
 
@@ -88,9 +97,9 @@ pub struct NodeContext {
     pub remote_resources: Arc<Mutex<HashMap<nodeinnet_p2p::p2p::ResourceType, String>>>,
     pub peer_resources: Arc<Mutex<Option<Vec<nodeinnet_p2p::SharedResource>>>>,
 
-    pub active_uploads: Arc<Mutex<HashMap<uuid::Uuid, PathBuf>>>,
     pub active_downloads: Arc<Mutex<HashMap<uuid::Uuid, ActiveDownload>>>,
     pub requested_downloads: Arc<Mutex<HashSet<uuid::Uuid>>>,
+    pub unconfirmed_uploads: Arc<Mutex<HashSet<uuid::Uuid>>>,
 
     pub active_terminals: Arc<Mutex<HashMap<String, ActiveTerminal>>>,
     pub active_socks_streams: Arc<Mutex<HashMap<uuid::Uuid, mpsc::Sender<Vec<u8>>>>>,
@@ -128,9 +137,9 @@ impl NodeContext {
             session_up: Arc::new(AtomicBool::new(false)),
             remote_resources: Arc::new(Mutex::new(HashMap::new())),
             peer_resources: Arc::new(Mutex::new(None)),
-            active_uploads: Arc::new(Mutex::new(HashMap::new())),
             active_downloads: Arc::new(Mutex::new(HashMap::new())),
             requested_downloads: Arc::new(Mutex::new(HashSet::new())),
+            unconfirmed_uploads: Arc::new(Mutex::new(HashSet::new())),
 
             active_terminals: Arc::new(Mutex::new(HashMap::new())),
             active_socks_streams: Arc::new(Mutex::new(HashMap::new())),
@@ -196,6 +205,20 @@ impl NodeContext {
         self.active_terminals.lock().await.clear();
         self.active_socks_streams.lock().await.clear();
         self.session_keys.lock().await.clear();
+        let mut partial = Vec::new();
+        self.active_downloads
+            .lock()
+            .await
+            .retain(|_, download| match download.upload.take() {
+                Some(upload) => {
+                    partial.push(upload.temp);
+                    false
+                }
+                None => true,
+            });
+        for temp in partial {
+            let _ = tokio::fs::remove_file(temp).await;
+        }
     }
 
     pub async fn process_message(&self, p2p_msg: P2pMessage) {
@@ -221,6 +244,7 @@ impl NodeContext {
                 | P2pMessage::FileTransferResponse { .. }
                 | P2pMessage::FileChunk { .. }
                 | P2pMessage::FileTransferComplete { .. }
+                | P2pMessage::FileTransferReceipt { .. }
                 | P2pMessage::TerminalOutput { .. }
                 | P2pMessage::SyncStateResponse { .. }
                 | P2pMessage::RemoteDesktopResponse { .. }

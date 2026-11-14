@@ -35,11 +35,6 @@ pub enum NetCmd {
         msg_template: P2pMessage,
     },
     HandleInboundSignal(InboundRtcSignal, Link),
-    RegisterUpload {
-        peer_id: String,
-        transfer_id: uuid::Uuid,
-        local_file_path: PathBuf,
-    },
     Call(String),
     AutoConnect(String),
     PeerConnected(String, Vec<nodeinnet_p2p::SharedResource>),

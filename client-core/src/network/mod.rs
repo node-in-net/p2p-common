@@ -18,6 +18,8 @@ use std::thread;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
 
+const QUEUED: usize = 16;
+
 pub async fn route_rtc_signal(
     envelope: RtcSignalEnvelope,
     current_ws_tx: &Option<tokio_mpsc::Sender<WsMessage>>,
@@ -84,18 +86,19 @@ pub fn start_network_thread(
 
 pub async fn run_network_manager(
     mut net_rx: tokio_mpsc::Receiver<NetCmd>,
-    net_tx: tokio_mpsc::Sender<NetCmd>,
+    _net_tx: tokio_mpsc::Sender<NetCmd>,
     handler: Arc<dyn AppEventHandler>,
     my_info: NodeInfo,
     private_key: String,
     peer_store: std::sync::Arc<dyn nodeinnet_p2p::PeerStore>,
     lan: Option<p2p_node::lan::LanConfig>,
 ) {
+    let (bg_tx, mut bg_rx) = tokio_mpsc::unbounded_channel();
     let mut manager = NetworkManager::new(
         my_info,
         private_key.clone(),
         handler.clone(),
-        net_tx.clone(),
+        bg_tx,
         peer_store.clone(),
     );
 
@@ -151,39 +154,60 @@ pub async fn run_network_manager(
     let mut later = VecDeque::new();
 
     loop {
-        let stop = if let Some(cmd) = later.pop_front() {
-            until_shutdown(manager.handle_net_cmd(cmd), &mut net_rx, &mut later).await
-        } else {
-            tokio::select! {
-                _ = reconnect_interval.tick() => {
-                    until_shutdown(manager.handle_tick(), &mut net_rx, &mut later).await
-                }
-                cmd_opt = net_rx.recv() => {
-                    match cmd_opt {
-                        Some(NetCmd::Shutdown) => true,
-                        Some(cmd) => {
-                            until_shutdown(manager.handle_net_cmd(cmd), &mut net_rx, &mut later).await
-                        }
-                        None => {
-                            manager.shutdown().await;
-                            break;
-                        }
+        let stop = tokio::select! {
+            Some(cmd) = async { later.pop_front() } => {
+                until_shutdown(
+                    manager.handle_net_cmd(cmd),
+                    &mut net_rx,
+                    &mut bg_rx,
+                    &mut later,
+                )
+                .await
+            }
+            _ = reconnect_interval.tick() => {
+                until_shutdown(manager.handle_tick(), &mut net_rx, &mut bg_rx, &mut later).await
+            }
+            Some(cmd) = bg_rx.recv(), if later.is_empty() => {
+                until_shutdown(
+                    manager.handle_net_cmd(cmd),
+                    &mut net_rx,
+                    &mut bg_rx,
+                    &mut later,
+                )
+                .await
+            }
+            cmd_opt = net_rx.recv(), if later.is_empty() => {
+                match cmd_opt {
+                    Some(NetCmd::Shutdown) => true,
+                    Some(cmd) => {
+                        until_shutdown(
+                            manager.handle_net_cmd(cmd),
+                            &mut net_rx,
+                            &mut bg_rx,
+                            &mut later,
+                        )
+                        .await
+                    }
+                    None => {
+                        manager.shutdown().await;
+                        break;
                     }
                 }
-                signal_opt = lan_rx.recv(), if lan_open => {
-                    match signal_opt {
-                        Some(signal) => {
-                            until_shutdown(
-                                manager.handle_lan_signal(signal),
-                                &mut net_rx,
-                                &mut later,
-                            )
-                            .await
-                        }
-                        None => {
-                            lan_open = false;
-                            false
-                        }
+            }
+            signal_opt = lan_rx.recv(), if lan_open => {
+                match signal_opt {
+                    Some(signal) => {
+                        until_shutdown(
+                            manager.handle_lan_signal(signal),
+                            &mut net_rx,
+                            &mut bg_rx,
+                            &mut later,
+                        )
+                        .await
+                    }
+                    None => {
+                        lan_open = false;
+                        false
                     }
                 }
             }
@@ -198,6 +222,7 @@ pub async fn run_network_manager(
 async fn until_shutdown(
     work: impl Future<Output = ()>,
     net_rx: &mut tokio_mpsc::Receiver<NetCmd>,
+    bg_rx: &mut tokio_mpsc::UnboundedReceiver<NetCmd>,
     later: &mut VecDeque<NetCmd>,
 ) -> bool {
     tokio::pin!(work);
@@ -205,7 +230,8 @@ async fn until_shutdown(
     loop {
         tokio::select! {
             _ = &mut work => return false,
-            cmd = net_rx.recv(), if open => match cmd {
+            Some(cmd) = bg_rx.recv() => later.push_back(cmd),
+            cmd = net_rx.recv(), if open && later.len() < QUEUED => match cmd {
                 Some(NetCmd::Shutdown) => return true,
                 Some(cmd) => later.push_back(cmd),
                 None => open = false,
@@ -246,6 +272,7 @@ mod tests {
     struct Quiet {
         dialled: AtomicUsize,
         disconnected: AtomicUsize,
+        receipts: std::sync::Mutex<Vec<(uuid::Uuid, bool)>>,
     }
 
     #[async_trait::async_trait]
@@ -257,7 +284,18 @@ mod tests {
         }
         async fn on_update_nodes(&self, _nodes: Vec<NodeInfo>) {}
         async fn on_download_complete(&self, _path: std::path::PathBuf) {}
-        async fn on_p2p_message(&self, _msg: P2pMessage) {}
+        async fn on_p2p_message(&self, msg: P2pMessage) {
+            if let P2pMessage::FileTransferReceipt {
+                transfer_id,
+                result,
+            } = msg
+            {
+                self.receipts
+                    .lock()
+                    .unwrap()
+                    .push((transfer_id, result.is_ok()));
+            }
+        }
         async fn on_p2p_connecting(&self, _peer_id: String) {
             self.dialled.fetch_add(1, Ordering::SeqCst);
         }
@@ -279,6 +317,125 @@ mod tests {
 
         fn update(&self, f: &mut dyn FnMut(&mut HashMap<String, PeerConfig>)) {
             self.peers.update(f)
+        }
+    }
+
+    struct Gate {
+        open: tokio::sync::Semaphore,
+        held: AtomicUsize,
+        redials: std::sync::Mutex<Vec<String>>,
+        dropped: AtomicUsize,
+    }
+
+    impl Gate {
+        fn shut() -> Arc<Self> {
+            Arc::new(Self {
+                open: tokio::sync::Semaphore::new(0),
+                held: AtomicUsize::new(0),
+                redials: std::sync::Mutex::new(Vec::new()),
+                dropped: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AppEventHandler for Gate {
+        async fn on_log(&self, msg: String) {
+            if msg.contains("[TURN]") {
+                self.redials.lock().unwrap().push(msg);
+                self.held.fetch_add(1, Ordering::SeqCst);
+                let _ = self.open.acquire().await;
+            }
+        }
+        async fn on_connected(&self) {}
+        async fn on_disconnected(&self) {}
+        async fn on_update_nodes(&self, _nodes: Vec<NodeInfo>) {}
+        async fn on_download_complete(&self, _path: std::path::PathBuf) {}
+        async fn on_p2p_message(&self, _msg: P2pMessage) {}
+        async fn on_p2p_connected(&self, _peer_id: String) {}
+        async fn on_p2p_disconnected(&self, _peer_id: String) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn held_network(
+        gate: &Arc<Gate>,
+        room: usize,
+    ) -> (tokio_mpsc::Sender<NetCmd>, tokio::task::JoinHandle<()>) {
+        let (net_tx, net_rx) = tokio_mpsc::channel(room);
+        let task = spawn_network_task(
+            net_rx,
+            net_tx.clone(),
+            gate.clone(),
+            node("aa-me"),
+            String::new(),
+            Arc::new(MemoryPeerStore::default()),
+            None,
+        );
+        (net_tx, task)
+    }
+
+    fn chunk() -> NetCmd {
+        NetCmd::SendToPeer("nobody".to_string(), P2pMessage::Ping(0))
+    }
+
+    async fn until(what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn fill(net_tx: &tokio_mpsc::Sender<NetCmd>) -> usize {
+        let mut taken = 0;
+        loop {
+            let before = taken;
+            while taken < 1024 && net_tx.try_send(chunk()).is_ok() {
+                taken += 1;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if taken == before || taken == 1024 {
+                return taken;
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Upload {
+        chunks: AtomicUsize,
+        lan_events: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AppEventHandler for Upload {
+        async fn on_log(&self, msg: String) {
+            if msg.contains("No focused peer") {
+                self.chunks.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        async fn on_connected(&self) {}
+        async fn on_disconnected(&self) {}
+        async fn on_update_nodes(&self, _nodes: Vec<NodeInfo>) {}
+        async fn on_download_complete(&self, _path: std::path::PathBuf) {}
+        async fn on_p2p_message(&self, _msg: P2pMessage) {}
+        async fn on_p2p_connected(&self, _peer_id: String) {}
+        async fn on_p2p_disconnected(&self, _peer_id: String) {}
+        async fn on_lan_event(&self, _event: p2p_node::lan::LanEvent) {
+            self.lan_events.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct NoTrust;
+
+    impl p2p_node::lan::TrustStore for NoTrust {
+        fn load(&self) -> std::io::Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn save(&self, _doc: &str) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
@@ -437,13 +594,115 @@ mod tests {
             .expect("the network task panicked");
     }
 
+    async fn session(
+        handler: &Arc<Quiet>,
+        net_tx: &tokio_mpsc::UnboundedSender<NetCmd>,
+        store: &Arc<dyn PeerStore>,
+    ) -> crate::rtc::WebRtcClient {
+        crate::rtc::WebRtcClient::new(
+            handler.clone(),
+            net_tx.clone(),
+            node("aa-me"),
+            "zz-peer".to_string(),
+            String::new(),
+            None,
+            store.clone(),
+            p2p_node::lan::Link::Account,
+        )
+        .await
+        .expect("a peer connection")
+    }
+
+    async fn uploading(peer: &crate::rtc::WebRtcClient) -> uuid::Uuid {
+        let upload = uuid::Uuid::new_v4();
+        peer.node_context
+            .unconfirmed_uploads
+            .lock()
+            .await
+            .insert(upload);
+        upload
+    }
+
+    #[tokio::test]
+    async fn shutdown_fails_the_uploads_its_sessions_left_unconfirmed() {
+        let handler = Arc::new(Quiet::default());
+        let (net_tx, _net_rx) = tokio_mpsc::unbounded_channel();
+        let store: Arc<dyn PeerStore> = Arc::new(MemoryPeerStore::default());
+        let peer = session(&handler, &net_tx, &store).await;
+        let _ = peer.peer_connection.close().await;
+        let upload = uploading(&peer).await;
+        let mut manager =
+            NetworkManager::new(node("aa-me"), String::new(), handler.clone(), net_tx, store);
+        manager.active_peers.insert("zz-peer".to_string(), peer);
+
+        manager.shutdown().await;
+
+        assert_eq!(*handler.receipts.lock().unwrap(), [(upload, false)]);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_session_fails_its_unconfirmed_uploads_at_once() {
+        let handler = Arc::new(Quiet::default());
+        let (net_tx, _net_rx) = tokio_mpsc::unbounded_channel();
+        let store: Arc<dyn PeerStore> = Arc::new(MemoryPeerStore::default());
+        let peer = session(&handler, &net_tx, &store).await;
+        let upload = uploading(&peer).await;
+        let connection = peer.peer_connection.clone();
+        let mut manager =
+            NetworkManager::new(node("aa-me"), String::new(), handler.clone(), net_tx, store);
+        manager.active_peers.insert("zz-peer".to_string(), peer);
+
+        manager
+            .handle_net_cmd(NetCmd::DisconnectPeer("zz-peer".to_string()))
+            .await;
+        assert_eq!(*handler.receipts.lock().unwrap(), [(upload, false)]);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while connection.connection_state()
+            != webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed
+        {
+            assert!(Instant::now() < deadline, "the session was never closed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(*handler.receipts.lock().unwrap(), [(upload, false)]);
+    }
+
+    #[tokio::test]
+    async fn an_upload_to_a_device_without_a_session_fails_at_once() {
+        let handler = Arc::new(Quiet::default());
+        let (net_tx, _net_rx) = tokio_mpsc::unbounded_channel();
+        let store: Arc<dyn PeerStore> = Arc::new(MemoryPeerStore::default());
+        let mut manager =
+            NetworkManager::new(node("aa-me"), String::new(), handler.clone(), net_tx, store);
+        let upload = uuid::Uuid::new_v4();
+
+        for msg in [
+            P2pMessage::FileUploadRequest {
+                resource_id: "fs-theirs".to_string(),
+                target_path: "/".to_string(),
+                file_name: "a.txt".to_string(),
+                total_size: 1,
+                transfer_id: upload,
+                permissions: None,
+            },
+            P2pMessage::FileChunk {
+                transfer_id: upload,
+                offset: 0,
+                data: vec![1],
+            },
+        ] {
+            manager
+                .handle_net_cmd(NetCmd::SendToPeer("zz-gone".to_string(), msg))
+                .await;
+        }
+
+        assert_eq!(*handler.receipts.lock().unwrap(), [(upload, false)]);
+    }
+
     #[tokio::test]
     async fn shutdown_does_not_wait_for_a_full_queue() {
         let handler = Arc::new(Quiet::default());
-        let (net_tx, _net_rx) = tokio_mpsc::channel(1);
-        net_tx
-            .try_send(NetCmd::Disconnect)
-            .expect("room for one command");
+        let (net_tx, _net_rx) = tokio_mpsc::unbounded_channel();
         let store: Arc<dyn PeerStore> = Arc::new(MemoryPeerStore::default());
         let peer = crate::rtc::WebRtcClient::new(
             handler.clone(),
@@ -474,9 +733,197 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sender_waits_while_the_loop_holds_a_full_queue() {
+        let gate = Gate::shut();
+        let (net_tx, task) = held_network(&gate, 4);
+        net_tx
+            .send(NetCmd::ApplyTurnCredentials(None))
+            .await
+            .expect("the network loop is listening");
+        until("the command to start", || {
+            gate.held.load(Ordering::SeqCst) == 1
+        })
+        .await;
+
+        assert_eq!(fill(&net_tx).await, QUEUED + 4);
+        let next = tokio::spawn({
+            let net_tx = net_tx.clone();
+            async move { net_tx.send(chunk()).await.is_ok() }
+        });
+        let shutdown = tokio::spawn({
+            let net_tx = net_tx.clone();
+            async move { net_tx.send(NetCmd::Shutdown).await.is_ok() }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!next.is_finished(), "a sender got past a full queue");
+
+        gate.open.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the network task outlived Shutdown")
+            .expect("the network task panicked");
+        assert!(next.await.expect("the sender panicked"));
+        assert!(shutdown.await.expect("the sender panicked"));
+    }
+
+    #[tokio::test]
+    async fn commands_the_loop_sends_itself_do_not_wait_for_a_full_queue() {
+        let gate = Gate::shut();
+        let (net_tx, task) = held_network(&gate, 4);
+        let mut callers = Vec::new();
+        for i in 0..3 {
+            let caller = webrtc::api::APIBuilder::new()
+                .build()
+                .new_peer_connection(
+                    webrtc::peer_connection::configuration::RTCConfiguration::default(),
+                )
+                .await
+                .expect("a peer connection");
+            caller
+                .create_data_channel("data", None)
+                .await
+                .expect("a data channel");
+            let offer = caller.create_offer(None).await.expect("an offer");
+            let inbound = nodeinnet_p2p::rtc::InboundRtcSignal {
+                from_node_id: format!("zz-{i}"),
+                signal: RtcSignal::Offer {
+                    sdp: offer.sdp,
+                    ice_restart: false,
+                },
+            };
+            net_tx
+                .send(NetCmd::HandleInboundSignal(
+                    inbound,
+                    p2p_node::lan::Link::Account,
+                ))
+                .await
+                .expect("the network loop is listening");
+            callers.push(caller);
+        }
+        net_tx
+            .send(NetCmd::ApplyTurnCredentials(None))
+            .await
+            .expect("the network loop is listening");
+        until("the redial to start", || {
+            gate.held.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        assert!(
+            gate.redials.lock().unwrap()[0].contains("redialling 3 peer(s)"),
+            "{:?}",
+            gate.redials.lock().unwrap()
+        );
+
+        fill(&net_tx).await;
+        gate.open.add_permits(1);
+        until("the three sessions to drop", || {
+            gate.dropped.load(Ordering::SeqCst) == 3
+        })
+        .await;
+
+        net_tx
+            .send(NetCmd::Shutdown)
+            .await
+            .expect("the network loop is listening");
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the network task outlived Shutdown")
+            .expect("the network task panicked");
+        for caller in callers {
+            let _ = caller.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_overtakes_a_held_command_and_the_queue_behind_it() {
+        let gate = Gate::shut();
+        let (net_tx, task) = held_network(&gate, 4);
+        net_tx
+            .send(NetCmd::ApplyTurnCredentials(None))
+            .await
+            .expect("the network loop is listening");
+        until("the command to start", || {
+            gate.held.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        for _ in 0..3 {
+            net_tx
+                .send(chunk())
+                .await
+                .expect("the network loop is listening");
+        }
+        net_tx
+            .send(NetCmd::Shutdown)
+            .await
+            .expect("the network loop is listening");
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("Shutdown waited for the held command")
+            .expect("the network task panicked");
+    }
+
+    #[tokio::test]
+    async fn a_lan_signal_does_not_wait_for_the_queue_to_drain() {
+        let handler = Arc::new(Upload::default());
+        let (net_tx, net_rx) = tokio_mpsc::channel(4);
+        let (private_key, _) = nodeinnet_p2p::crypto::generate_ed25519_keypair();
+        let task = spawn_network_task(
+            net_rx,
+            net_tx.clone(),
+            handler.clone(),
+            node("aa-me"),
+            private_key,
+            Arc::new(MemoryPeerStore::default()),
+            Some(p2p_node::lan::LanConfig {
+                name: "me".to_string(),
+                os: "linux".to_string(),
+                kind: "desktop".to_string(),
+                visibility: p2p_node::lan::Visibility::Off,
+                browse: false,
+                port: 0,
+                resources: Vec::new(),
+                trust: Arc::new(NoTrust),
+                test_mode: true,
+            }),
+        );
+        until("the LAN to report its state", || {
+            handler.lan_events.load(Ordering::SeqCst) > 0
+        })
+        .await;
+        let seen = handler.lan_events.load(Ordering::SeqCst);
+
+        let mut sent = 0;
+        while handler.lan_events.load(Ordering::SeqCst) == seen {
+            assert!(sent < 400, "a LAN signal waited behind {sent} chunks");
+            if sent == 2 * QUEUED {
+                net_tx
+                    .send(NetCmd::Lan(crate::LanCmd::Browse(false)))
+                    .await
+                    .expect("the network loop is listening");
+            }
+            net_tx
+                .send(NetCmd::SendP2p(String::new()))
+                .await
+                .expect("the network loop is listening");
+            sent += 1;
+        }
+        let queued = sent - handler.chunks.load(Ordering::SeqCst);
+        assert!(queued >= QUEUED, "only {queued} chunks were queued");
+
+        net_tx
+            .send(NetCmd::Shutdown)
+            .await
+            .expect("the network loop is listening");
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the network task outlived Shutdown")
+            .expect("the network task panicked");
+    }
+
+    #[tokio::test]
     async fn after_disconnect_two_ticks_dial_no_cached_peer() {
         let handler = Arc::new(Quiet::default());
-        let (net_tx, mut net_rx) = tokio_mpsc::channel(64);
+        let (net_tx, mut net_rx) = tokio_mpsc::unbounded_channel();
         let store = Arc::new(Cache::default());
         store.update(&mut |peers| {
             peers.insert(
